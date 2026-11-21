@@ -1,0 +1,101 @@
+@* Copyright (c) 2026 LMS Developer. All rights reserved.
+   Applicable licence and release scope: see LICENSE.md for details. *@
+@implements IAsyncDisposable
+@using LinuxMadeSane.Core.Abstractions
+@using LinuxMadeSane.Core.Models
+@using LinuxMadeSane.Core.Models.Ai
+@inject ITerminalSessionService Sessions
+
+@if (!string.IsNullOrEmpty(error))
+{
+    <p class="callout error" role="alert">@error</p>
+}
+@if (tab?.IsSessionActive == true)
+{
+    <TerminalAiPanel Tab="tab" FleetApproval="@Approval" @ref="panel" AgentCommandLimit="32" RunCommand="RunCommandAsync" OnAgentStopped="AgentStoppedAsync" />
+    <UiCommandButton Label="Verify packages and continue" Glyph="UiIconGlyph.Refresh" Disabled="@verifying" OnClick="VerifyAsync" />
+}
+else if (string.IsNullOrEmpty(error))
+{
+    <p class="callout info" role="status">Connecting to @Host.Name for AI package repair…</p>
+}
+
+@code {
+    [Parameter, EditorRequired] public ManagedHost Host { get; set; } = default!;
+    [Parameter] public FleetPackageApprovalScope? Approval { get; set; }
+    [Parameter] public string Prompt { get; set; } = "";
+    [Parameter] public EventCallback<string> OnVerified { get; set; }
+    [Parameter] public EventCallback<string> OnAttention { get; set; }
+    private TerminalTabState? tab;
+    private TerminalAiPanel? panel;
+    private bool startPrompt;
+    private bool verifying;
+    private string error = "";
+    private readonly CancellationTokenSource lifetime = new();
+
+    protected override async Task OnInitializedAsync()
+    {
+        try
+        {
+            tab=TerminalTabState.Create(Host);
+            tab.AiAccessMode=TerminalAiAccessMode.Agent;
+            tab.RequestConnection();
+            using var timeout=CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
+            timeout.CancelAfter(TimeSpan.FromSeconds(45));
+            var session=await Sessions.StartSessionAsync(Host,new(tab.Username,null,null,null,true,160,40,tab.DefaultWorkingDirectory,tab.Id),timeout.Token);
+            tab.SessionId=session.Id;
+            tab.Snapshot=await Sessions.GetSnapshotAsync(session.Id,timeout.Token) ?? new(session.Id,session.Status,session.WorkingDirectory,"",0,session.StartedAtUtc,session.LastActivityUtc) { Username=session.Username };
+            startPrompt=true;
+        }
+        catch(Exception ex)
+        {
+            error="Could not connect: "+ex.Message+". Skip this server to continue the queue.";
+            if(!lifetime.IsCancellationRequested) await OnAttention.InvokeAsync(error);
+        }
+    }
+    protected override Task OnAfterRenderAsync(bool firstRender)
+    {
+        if(startPrompt && panel is not null)
+        {
+            startPrompt=false;
+            _ = panel.StartAgentPromptAsync(Prompt);
+        }
+        return Task.CompletedTask;
+    }
+    private Task RunCommandAsync(string command,CancellationToken token) => Sessions.SendInputAsync(tab!.SessionId!.Value,command.TrimEnd()+Environment.NewLine,token);
+    private Task AgentStoppedAsync(bool completed) => completed ? VerifyAsync() : Task.CompletedTask;
+    private async Task VerifyAsync()
+    {
+        if(verifying) return;
+        verifying=true; error="";
+        try
+        {
+            var result=panel is null ? null : await panel.VerifyPackageUpdatesAsync();
+            if(result is null) error="Finish the active AI command or authentication, then verify again.";
+            else if(result.IsSuccess && !lifetime.IsCancellationRequested)
+            {
+                var report=string.Join("\n\n",tab!.AiConversation.Entries.TakeLast(6).Select(entry=>entry.Content));
+                await OnVerified.InvokeAsync(report+"\n\nFinal verification:\n"+(result.StandardOutput+"\n"+result.StandardError).Trim());
+            }
+            else error="Packages still need attention. Continue with the AI agent or skip this server. "+(result.StandardOutput+"\n"+result.StandardError).Trim();
+        }
+        catch(OperationCanceledException) when(lifetime.IsCancellationRequested) { }
+        catch(Exception ex) { error="Verification failed: "+ex.Message; }
+        finally
+        {
+            verifying=false;
+            if(!lifetime.IsCancellationRequested && error.Length>0) await OnAttention.InvokeAsync(error);
+        }
+    }
+    public async ValueTask DisposeAsync()
+    {
+        lifetime.Cancel();
+        if(tab is not null)
+        {
+            tab.CancelAiOperation();
+            tab.RequestDisconnect();
+            await Sessions.CloseOwnedSessionsAsync(tab.Id,CancellationToken.None);
+        }
+        lifetime.Dispose();
+    }
+}

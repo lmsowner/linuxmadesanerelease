@@ -1,0 +1,552 @@
+@* Copyright (c) 2026 LMS Developer. All rights reserved.
+   Applicable licence and release scope: see LICENSE.md for details. *@
+@using System.Net.Mail
+@using System.Security.Cryptography
+@using System.Security.Cryptography.X509Certificates
+@using System.Text
+@using System.Text.Json
+@using LinuxMadeSane.Application.Contracts.MailRelay
+@using LinuxMadeSane.Application.Interfaces
+@using LinuxMadeSane.Core.Abstractions
+@using LinuxMadeSane.Core.Models.MailRelay
+@using LinuxMadeSane.Core.Models.Messaging
+@using LinuxMadeSane.Infrastructure.Services
+@inject IServiceScopeFactory ServiceScopes
+@inject MailProviderSetupDraftStore Drafts
+@inject MailProviderConnectionStore Connections
+@inject ISecretStore Secrets
+@inject IOutboundMailProvider Provider
+@inject IMailDeliveryReceipts Receipts
+@inject GoogleMailAuthorisation Google
+@inject MicrosoftMailRegistration MicrosoftRegistration
+@inject HttpsOutboundMailProvider SesSetup
+@inject IMessagingEmailSettingsStore Messaging
+@inject IMailRelayService Relay
+@inject NavigationManager Navigation
+@inject IJSRuntime Js
+@implements IDisposable
+
+<TabControl ActiveValue="@(((int)SelectedProvider).ToString())" ActiveValueChanged="SelectTabValueAsync" Class="page-tab-control mail-delivery-tabs" PanelClass="page-tab-panel">
+    @foreach (var tab in ProviderTabs)
+    {
+        <TabPage @key="tab" Value="@(((int)tab).ToString())" Title="@ProviderName(tab)" Disabled="@busy">
+            <div class="page-tab-content">
+                @ProviderContent
+                @if (tab == MailRelayOutboundMode.DirectPort25) { @ChildContent }
+            </div>
+        </TabPage>
+    }
+</TabControl>
+
+<div class="mail-provider-dialog-host">
+<UiModal IsOpen="@(retryReceipt is not null)" Title="Authorise another delivery attempt?" OnClose="CancelRetry">
+    <p>The provider may already have accepted queue @retryReceipt?.QueueId. Check its message trace first. Another attempt can send a duplicate.</p>
+    <UiCheckboxField Label="I checked provider tracing and want the queue to try this message again" @bind-Value="retryConfirmed" />
+    @if (!string.IsNullOrEmpty(pageStatus)) { <p role="status">@pageStatus</p> }
+    <UiCommandButton Label="Allow queue retry" Glyph="UiIconGlyph.Analyze" Disabled="@(!retryConfirmed || busy)" OnClick="ConfirmRetryAsync" />
+</UiModal>
+
+<UiModal IsOpen="@open" Title="@(registrationCancellation is null ? $"{ProviderName(mode)} connection" : "Connect Microsoft 365")" Subtitle="@(registrationCancellation is null ? "Connect and test independently of live mail." : sender)" Class="@(registrationCancellation is null ? "mail-provider-modal" : "mail-provider-modal registration-modal")" CloseOnBackdrop="false" OnClose="Close">
+    @if (registrationCancellation is not null)
+    {
+        <section class="provider-registration" aria-label="Microsoft registration">
+            @if (!string.IsNullOrEmpty(microsoftDeviceCode))
+            {
+                <p class="registration-instruction">@(microsoftStage == "exchange" ? "Authorise mailbox access in Exchange Online. Your Entra application is saved." : "Sign in with your Microsoft 365 administrator account.")</p>
+                <div class="registration-sign-in">
+                    <div class="registration-code"><span class="meta-text">One-time code</span><code>@microsoftDeviceCode</code></div>
+                    <div class="registration-actions">
+                        <UiCommandButton Label="Open Microsoft sign-in" Glyph="UiIconGlyph.Connect" Href="https://microsoft.com/devicelogin" Target="_blank" Rel="noopener noreferrer" Variant="UiButtonVariant.Primary" />
+                        <UiCommandButton Label="Copy code" Glyph="UiIconGlyph.Copy" OnClick="CopyMicrosoftCodeAsync" />
+                    </div>
+                </div>
+                @if (!string.IsNullOrWhiteSpace(registrationCopyStatus)) { <p class="meta-text" role="status">@registrationCopyStatus</p> }
+            }
+            else { <p class="registration-instruction" role="status" aria-live="polite">@status</p> }
+            <div class="registration-footer">
+                @if (!string.IsNullOrEmpty(microsoftDeviceCode)) { <span class="meta-text" role="status">Waiting for Microsoft sign-in…</span> }
+                else { <span class="meta-text">Any active installation will finish safely before cancellation.</span> }
+                <UiCommandButton Label="Cancel registration" Glyph="UiIconGlyph.Stop" OnClick="CancelMicrosoftRegistration" />
+            </div>
+        </section>
+    }
+    else
+    {
+    @if (!string.IsNullOrWhiteSpace(status)) { <p role="status" aria-live="polite" class="callout provider-status">@status</p> }
+    @if (mode == MailRelayOutboundMode.MicrosoftGraph && !string.IsNullOrEmpty(api.MicrosoftSetupDiagnostic))
+    { <details class="provider-status"><summary>Exchange response</summary><p>@api.MicrosoftSetupDiagnostic</p></details> }
+    <fieldset disabled="@busy">
+        @if (!IsApi)
+        {
+            <p>Direct SMTP uses the existing DNS, DKIM and destination-port setup.</p>
+            <UiCommandButton Label="Configure direct SMTP" Glyph="UiIconGlyph.Edit" OnClick="ConfigureDirectAsync" />
+        }
+        else
+        {
+            <div class="provider-identity">
+                <UiTextField Label="Connection name" @bind-Value="connectionName" @bind-Value:after="MarkUnsaved" />
+            <UiTextField Label="Sender mailbox" Type="email" @bind-Value="sender" @bind-Value:after="Invalidate" Helper="Messages must use this authorised address as From. Reply-To may be different." />
+            </div>
+            <div class="provider-paths">
+                <button type="button" class="glass-button glass-button-ghost ui-button" aria-pressed="@(guided ? "true" : "false")" @onclick="() => guided = true">Guide me through setup</button>
+                <button type="button" class="glass-button glass-button-ghost ui-button" aria-pressed="@(!guided ? "true" : "false")" @onclick="() => guided = false">I already have settings</button>
+            </div>
+            @if (mode == MailRelayOutboundMode.MicrosoftGraph)
+            {
+                @if (guided)
+                {
+                    <p>Sign in as your Microsoft 365 administrator. LMS registers a certificate and limits sending to this mailbox. Tenant and application details are captured automatically.</p>
+                    @if (!string.IsNullOrEmpty(api.MicrosoftMailboxObjectId) && !string.Equals(api.MicrosoftRegistrationMailbox, api.SenderAddress, StringComparison.OrdinalIgnoreCase))
+                    { <p class="meta-text">Exchange resolved @api.MicrosoftRegistrationMailbox to its primary sending address, @api.SenderAddress. Messages will use this primary address.</p> }
+                    <UiCommandButton Label="@(api.MicrosoftSetupStage == MicrosoftMailSetupStage.ExchangeAuthenticated ? "Finish mailbox setup" : api.MicrosoftSetupStage == MicrosoftMailSetupStage.ApplicationRegistered ? "Continue mailbox authorisation" : "Register with Microsoft 365")" Glyph="UiIconGlyph.Connect" OnClick="PrepareMicrosoftAsync" />
+                    @if (api.CertificateSecretReference is not null && !string.IsNullOrWhiteSpace(clientId))
+                    {
+                        <p class="meta-text">@(api.MicrosoftSetupStage == MicrosoftMailSetupStage.ExchangeAuthenticated ? "Exchange sign-in succeeded. Mailbox permission setup is unfinished." : api.MicrosoftSetupStage == MicrosoftMailSetupStage.ApplicationRegistered ? "Entra application saved. Continue mailbox authorisation to finish setup." : "Application registered. Check the connection and send a test below.")</p>
+                        <details><summary>Saved application details</summary><dl><dt>Tenant ID</dt><dd>@tenant</dd><dt>Application ID</dt><dd>@clientId</dd></dl></details>
+                    }
+                    <p class="meta-text">LMS prepares the required tools automatically. Complete both Microsoft administrator sign-ins when prompted.</p>
+                }
+                else
+                {
+                    <UiCommandButton Label="Use existing LMS Microsoft settings" Glyph="UiIconGlyph.Connect" OnClick="ReuseMicrosoftAsync" />
+                    <div class="provider-fields">
+                        <UiTextField Label="Tenant ID" @bind-Value="tenant" @bind-Value:after="Invalidate" />
+                        <UiTextField Label="Application (client) ID" @bind-Value="clientId" @bind-Value:after="Invalidate" />
+                    </div>
+                    <div class="provider-fields">
+                        <UiTextField Label="Certificate file password (if required)" Type="password" Autocomplete="new-password" @bind-Value="certificatePassword" />
+                        <UiField Label="Application certificate (.pfx or .p12)"><InputFile OnChange="ImportMicrosoftCertificateAsync" accept=".pfx,.p12" class="ui-control-input" /></UiField>
+                    </div>
+                    <p class="meta-text">@(api.CertificateSecretReference is null ? "Upload the private certificate whose public key is registered in Entra." : "Certificate stored securely. Upload only to replace it.")</p>
+                    <details><summary>Existing application secret</summary>
+                        <UiTextField Label="Application secret" Helper="For an existing secret-based application only. Leave blank to keep its stored credential; entering a value replaces this connection's certificate authentication." Type="password" Autocomplete="new-password" @bind-Value="clientSecret" @bind-Value:after="Invalidate" />
+                    </details>
+                    <p class="meta-text">Restrict mailbox access using Exchange application RBAC. Existing tenant-wide Mail.Send grants remain additive. Check the connection, then send a test to verify mailbox access.</p>
+                }
+            }
+            else if (mode == MailRelayOutboundMode.Gmail)
+            {
+                <UiCheckboxField Label="Google Workspace administrator · domain-wide delegation" @bind-Value="workspace" @bind-Value:after="Invalidate" />
+                @if (workspace)
+                {
+                    @if (guided)
+                    {
+                        <ol>
+                            <li>Create a Google Cloud service account in your organisation's project and enable Gmail API.</li>
+                            <li>In Workspace Admin → Security → API controls → Domain-wide delegation, authorise that service account's numeric OAuth client ID.</li>
+                            <li>Grant only <code>https://www.googleapis.com/auth/gmail.send</code> and enter the delegated mailbox above.</li>
+                            <li>Upload the service-account JSON key below. LMS encrypts it immediately.</li>
+                        </ol>
+                    }
+                    <p class="meta-text">Workspace administrator authorisation is required. Service accounts cannot send from personal Gmail. This path uses an encrypted key; keyless delegation is not configured by this wizard.</p>
+                    <label>Service-account key <InputFile OnChange="ImportServiceAccountAsync" accept=".json,application/json" /></label>
+                    <p class="meta-text">@(api.ServiceAccountSecretReference is null ? "No key stored" : "Key stored securely; upload only to replace it")</p>
+                }
+                else
+                {
+                    @if (guided)
+                    {
+                        <ol>
+                            <li><a href="https://console.cloud.google.com/apis/library/gmail.googleapis.com" target="_blank" rel="noopener noreferrer">Enable Gmail API</a> in your own Google Cloud project.</li>
+                            <li>Configure Google Auth Platform consent for your account or organisation. Add Gmail sending permission.</li>
+                            <li><a href="https://console.cloud.google.com/auth/clients" target="_blank" rel="noopener noreferrer">Create a Web application OAuth client</a> and register the callback shown below.</li>
+                        </ol>
+                    }
+                    <p class="meta-text">Registered callback</p><code class="callback">@Callback</code>
+                    <p class="meta-text">Use the same LMS URL during consent. A remote server's 127.0.0.1 is not your browser's localhost; use an HTTPS LMS address or an SSH browser tunnel.</p>
+                    <div class="provider-fields">
+                    <UiTextField Label="Google OAuth client ID" @bind-Value="clientId" @bind-Value:after="Invalidate" />
+                    <UiTextField Label="Google client secret" Helper="Leave blank to keep the stored credential." Type="password" Autocomplete="new-password" @bind-Value="clientSecret" @bind-Value:after="Invalidate" />
+                    </div>
+                    <UiCommandButton Label="Connect Google Account" Glyph="UiIconGlyph.Connect" OnClick="ConnectGoogleAsync" />
+                    @if (!string.IsNullOrEmpty(googleConsentUrl)) { <UiCommandButton Label="Continue to Google" Glyph="UiIconGlyph.Connect" Href="@googleConsentUrl" Target="_blank" Rel="noopener noreferrer" Variant="UiButtonVariant.Primary" /> }
+                    <p class="meta-text">Only Gmail sending access (gmail.send) is requested. External apps in Google's Testing mode expire renewable authorisation after seven days. Use an appropriate published customer-owned app for unattended sending.</p>
+                }
+            }
+            else if (mode == MailRelayOutboundMode.AmazonSes)
+            {
+                <div class="provider-fields"><UiTextField Label="AWS region" @bind-Value="region" @bind-Value:after="Invalidate" /><UiTextField Label="SES sending identity · verified domain or email" @bind-Value="identity" @bind-Value:after="Invalidate" /></div>
+                @if (guided)
+                {
+                    <p>LMS prepares SES using the AWS account selected below. No command-line tools are required.</p>
+                    <UiCommandButton Label="Prepare SES identity" Glyph="UiIconGlyph.Analyze" OnClick="PrepareAmazonAsync" />
+                    @if (sesSetup is not null)
+                    {
+                        <p class="meta-text">Account @sesSetup.AccountId · @(sesSetup.Sandbox ? "Sandbox: recipients must be verified until AWS approves production access." : "Production access enabled.")</p>
+                        @if (sesSetup.DnsRecords.Count > 0)
+                        {
+                            <p class="meta-text">Publish these SES verification records in your domain's DNS.</p>
+                            <div class="provider-dns"><table><thead><tr><th>Name</th><th>Type</th><th>Value</th></tr></thead><tbody>
+                            @foreach (var record in sesSetup.DnsRecords) { <tr><td>@record.Name</td><td>@record.Type</td><td>@record.Value</td></tr> }
+                            </tbody></table></div>
+                        }
+                        else if (!sesSetup.Verified) { <p class="meta-text">Complete the verification email sent by AWS, then check the connection.</p> }
+                        <details><summary>Sending policy for your AWS administrator</summary><p class="meta-text">Grant this restricted policy to the LMS host role or account credentials. Production access remains subject to AWS approval.</p><pre><code>@sesSetup.SendingPolicy</code></pre></details>
+                    }
+                }
+                <UiCheckboxField Label="Use credentials already available to the LMS service · recommended role or short-lived credentials" @bind-Value="awsRole" @bind-Value:after="Invalidate" />
+                @if (!awsRole)
+                {
+                    <div class="provider-fields">
+                    <UiTextField Label="AWS access key ID" Type="password" Autocomplete="new-password" @bind-Value="accessKey" @bind-Value:after="Invalidate" />
+                    <UiTextField Label="AWS secret access key" Type="password" Autocomplete="new-password" @bind-Value="secretKey" @bind-Value:after="Invalidate" />
+                    <UiTextField Label="Session token · if using temporary credentials" Type="password" Autocomplete="new-password" @bind-Value="sessionToken" @bind-Value:after="Invalidate" />
+                    </div>
+                    <p class="meta-text">Leave credentials blank to retain the encrypted stored values. Manually supplied temporary credentials must be replaced when they expire; role credentials renew through the AWS SDK.</p>
+                }
+            }
+            <section class="provider-verify">
+                <h3>Verify &amp; save</h3>
+                <div class="provider-actions"><UiCommandButton Label="Check connection" Glyph="UiIconGlyph.Analyze" Disabled="@MicrosoftSetupIncomplete" OnClick="CheckAsync" /><UiTextField Label="Test recipient" Type="email" @bind-Value="testRecipient" /><UiCommandButton Label="Send test email" Glyph="UiIconGlyph.Send" Disabled="@(!checkedConnection || uncertainTest)" OnClick="TestAsync" /></div>
+                <p class="meta-text">A provider accepting the test does not guarantee arrival. Check the recipient's inbox and provider trace.</p>
+                @if (uncertainTest) { <p class="callout warning">Test acceptance is uncertain. Check provider tracing before starting another test.</p> }
+                @if (Configuration?.Enabled != true)
+                { <UiTextField Label="Private relay hostname" @bind-Value="hostname" @bind-Value:after="Invalidate" Helper="Used by the existing SMTP listener and its private TLS certificate; no public DNS is required for API sending." /> }
+                <p class="meta-text">Send a successful test before saving. All relay clients must use the authorised sender address with this provider.</p>
+                <UiCommandButton Label="Save connection" Glyph="UiIconGlyph.Save" Variant="UiButtonVariant.Primary" Disabled="@(!checkedConnection || !testedSender)" OnClick="SaveConnectionAsync" />
+                <p class="meta-text">Saves this connection for testing. Live notifications, OTPs and relay clients keep their current delivery route.</p>
+                <details class="activate-connection"><summary>Use this connection for live mail</summary>
+                    <p>This replaces the route used by notifications, OTPs and existing SMTP clients. Save and test the connection first.</p>
+                    <UiCheckboxField Label="Switch live mail to this connection" @bind-Value="confirmed" />
+                    <UiCommandButton Label="Use for live mail" Glyph="UiIconGlyph.Connect" Variant="UiButtonVariant.Danger" Disabled="@(!checkedConnection || !testedSender || !confirmed || editingConnectionId is null || !settingsSaved)" OnClick="ActivateAsync" />
+                </details>
+            </section>
+        }
+    </fieldset>
+    }
+    @if (job is not null)
+    {
+        <ol class="provider-job" aria-live="polite">@foreach (var step in job.Steps) { <li><strong>@step.Label</strong> · @step.Detail</li> }</ol>
+        @if (job.Result?.GeneratedPassword is { } password)
+        { <p class="callout">New private SMTP application login: <strong>@job.Result.Username</strong>. Copy this new password now; it will not be shown again: <code>@password</code></p> }
+    }
+</UiModal>
+
+</div>
+
+@code {
+    private RenderFragment ProviderContent => @<section class="surface-subcard outbound-provider">
+    <div class="provider-heading">
+        @if (SelectedProvider == MailRelayOutboundMode.DirectPort25)
+        { <div class="provider-live"><span class="meta-text">Active route</span><strong>@(Configuration?.Enabled == true ? ProviderName(Configuration.Outbound.Mode) : "Not configured")</strong><span class="meta-text">@Configuration?.RelayHostname</span></div> }
+        else { <h2>Connections</h2> }
+        <div class="provider-heading-actions">
+        @if (SelectedProvider != MailRelayOutboundMode.DirectPort25)
+        { <UiCommandButton Label="Add connection" Glyph="UiIconGlyph.Plus" OnClick="OpenAsync" /> }
+        else { @ProtectionAction <UiCommandButton Label="Configure" Glyph="UiIconGlyph.Edit" OnClick="ConfigureDirectAsync" /> @DirectActions }
+        <UiCommandButton Label="Refresh" Glyph="UiIconGlyph.Refresh" Disabled="@busy" OnClick="RefreshAsync" />
+        </div>
+    </div>
+    @if (SelectedProvider != MailRelayOutboundMode.DirectPort25)
+    {
+    <div class="provider-live"><span class="meta-text">Active route</span><strong>@(Configuration?.Enabled == true ? ProviderName(Configuration.Outbound.Mode) : "Not configured")</strong>
+        @if (Configuration?.Enabled == true) { <span class="meta-text">@(Configuration.Outbound.UsesHttpsApi ? Configuration.Outbound.Api.SenderAddress : Configuration.RelayHostname)</span> }
+    </div>
+    }
+    @foreach (var connection in savedConnections.Where(c => SelectedProvider == MailRelayOutboundMode.DirectPort25 ? !c.Settings.UsesHttpsApi : c.Settings.Mode == SelectedProvider))
+    {
+        <article class="saved-connection">
+            <div><strong>@connection.Name</strong><small>@connection.Settings.Api.SenderAddress</small><small>@(connection.LastTestAcceptedUtc is { } tested ? $"Test accepted {tested:yyyy-MM-dd HH:mm} UTC" : "Saved settings")</small></div>
+            <div class="connection-actions">
+                @if (Configuration?.Enabled == true && MailProviderConnectionStore.Matches(connection.Settings, Configuration.Outbound)) { <UiPill Tone="UiPillTone.Success">Live</UiPill> }
+                else { <UiPill Tone="UiPillTone.Neutral">Test connection</UiPill> }
+                @if (connection.Settings.UsesHttpsApi) { <UiCommandButton Label="Configure / test" Glyph="UiIconGlyph.Edit" OnClick="() => EditConnectionAsync(connection)" /> }
+                else { <UiCommandButton Label="Review LMS setup" Glyph="UiIconGlyph.Edit" OnClick="ConfigureDirectAsync" /> }
+            </div>
+        </article>
+    }
+    @if (SelectedProvider != MailRelayOutboundMode.DirectPort25 && !savedConnections.Any(c => c.Settings.Mode == SelectedProvider))
+    { <p class="meta-text">No connections saved. Add one to configure and test this provider.</p> }
+    @if (!string.IsNullOrWhiteSpace(pageStatus)) { <p role="status" class="callout">@pageStatus</p> }
+    @if (attention.Count > 0)
+    {
+        <details open>
+            <summary>Delivery needs attention (@attention.Count)</summary>
+            @foreach (var receipt in attention)
+            {
+                <div class="attempt">
+                    <strong>Queue @receipt.QueueId · @OutcomeName(receipt.Outcome)</strong><p>@receipt.Detail</p>
+                    @if (receipt.Outcome == MailDeliveryOutcome.Indeterminate)
+                    {
+                        <p class="meta-text">Check provider message tracing before resolving. Resending may create a duplicate. Resolution is available five minutes after submission.</p>
+                        <button class="glass-button glass-button-ghost ui-button" disabled="@(busy || receipt.UpdatedUtc > DateTimeOffset.UtcNow.AddMinutes(-5))" @onclick="() => ResolveAsync(receipt, true)">Provider accepted it</button>
+                        <button class="glass-button glass-button-ghost ui-button" disabled="@(busy || receipt.UpdatedUtc > DateTimeOffset.UtcNow.AddMinutes(-5))" @onclick="() => RequestRetry(receipt)">Review another attempt</button>
+                    }
+                </div>
+            }
+        </details>
+    }
+</section>;
+
+    [Parameter] public RenderFragment? ProtectionAction { get; set; }
+    [Parameter] public RenderFragment? DirectActions { get; set; }
+    [Parameter] public RenderFragment? ChildContent { get; set; }
+    [Parameter] public MailRelayOutboundMode SelectedProvider { get; set; } = MailRelayOutboundMode.DirectPort25;
+    [Parameter] public EventCallback<MailRelayOutboundMode> SelectedProviderChanged { get; set; }
+    [Parameter] public MailRelayConfiguration? Configuration { get; set; }
+    [Parameter] public string SuggestedHostname { get; set; } = "smtp.lms.local";
+    [Parameter] public EventCallback ConfigureDirect { get; set; }
+    [Parameter] public EventCallback Changed { get; set; }
+    private readonly string owner = Guid.NewGuid().ToString("N");
+    private bool settingsSaved, open, busy, guided = true, workspace, awsRole = true, checkedConnection, testedSender, confirmed, uncertainTest, retryConfirmed;
+    private MailRelayOutboundMode mode;
+    private MailRelayApiSettings api = new();
+    private string googleConsentUrl = "";
+    private string connectionName = "";
+    private Guid? editingConnectionId;
+    private DateTimeOffset? lastConnectionCheckUtc, lastTestAcceptedUtc;
+    private IReadOnlyList<MailProviderConnection> savedConnections = [];
+    private static readonly MailRelayOutboundMode[] ProviderTabs = [MailRelayOutboundMode.DirectPort25, MailRelayOutboundMode.MicrosoftGraph, MailRelayOutboundMode.Gmail, MailRelayOutboundMode.AmazonSes];
+    private Task SelectTabValueAsync(string? value) => int.TryParse(value, out var parsed) && ProviderTabs.Contains((MailRelayOutboundMode)parsed)
+        ? SelectTabAsync((MailRelayOutboundMode)parsed) : Task.CompletedTask;
+    private async Task SelectTabAsync(MailRelayOutboundMode tab) { if (busy) return; SelectedProvider = tab; await SelectedProviderChanged.InvokeAsync(tab); }
+
+    private SesMailSetupResult? sesSetup;
+    private string microsoftDeviceCode = "", registrationCopyStatus = "", certificatePassword = "";
+    private CancellationTokenSource? registrationCancellation;
+    private string sender = "", tenant = "", clientId = "", clientSecret = "", region = "eu-west-2", identity = "", accessKey = "", secretKey = "", sessionToken = "", testRecipient = "", hostname = "", script = "", status = "", pageStatus = "", googleState = "";
+    private MailRelayProvisioningJobSnapshot? job;
+    private IReadOnlyList<MailDeliveryReceipt> attention = [];
+    private MailDeliveryReceipt? retryReceipt;
+    private readonly CancellationTokenSource lifetime = new();
+    private bool IsApi => mode is MailRelayOutboundMode.MicrosoftGraph or MailRelayOutboundMode.Gmail or MailRelayOutboundMode.AmazonSes;
+    private string Callback => new Uri(new Uri(Navigation.BaseUri), "auth/mail-relay/google/callback").AbsoluteUri;
+    protected override async Task OnInitializedAsync() => await RefreshAsync();
+    private async Task RefreshAsync() { try { attention = await Receipts.ListAttentionAsync(lifetime.Token); savedConnections = await Connections.ListAsync(lifetime.Token); } catch { pageStatus = "Delivery status could not be loaded. Refresh to try again."; } }
+    private async Task OpenAsync()
+    {
+        mode = SelectedProvider; sesSetup = null;
+        settingsSaved = false; editingConnectionId = null; connectionName = ProviderName(mode) + " " + (savedConnections.Count(c => c.Settings.Mode == mode) + 1);
+        lastConnectionCheckUtc = lastTestAcceptedUtc = null;
+        MailRelayOutboundSettings? draft;
+        try { draft = IsApi ? await Drafts.GetAsync(mode, lifetime.Token) : null; }
+        catch { pageStatus = "Saved setup could not be loaded. Refresh this page before configuring delivery."; return; }
+        googleState = googleConsentUrl = "";
+        api = draft?.Api ?? new(); sender = api.SenderAddress; tenant = api.TenantId; clientId = api.ClientId;
+        workspace = api.WorkspaceDelegation; testRecipient = api.SenderAddress; awsRole = api.AwsCredentialsSecretReference is null; region = api.Region; identity = api.SendingIdentity;
+        hostname = Configuration?.RelayHostname ?? (string.IsNullOrWhiteSpace(SuggestedHostname) ? Environment.MachineName + ".local" : SuggestedHostname); status = api.MicrosoftSetupIssue; job = null; checkedConnection = testedSender = confirmed = false; script = ""; open = true;
+    }
+    private async Task EditConnectionAsync(MailProviderConnection connection)
+    {
+        await OpenAsync(); editingConnectionId = connection.Id; connectionName = connection.Name; mode = connection.Settings.Mode; api = connection.Settings.Api;
+        sender = api.SenderAddress; tenant = api.TenantId; clientId = api.ClientId; workspace = api.WorkspaceDelegation;
+        awsRole = api.AwsCredentialsSecretReference is null; region = api.Region; identity = api.SendingIdentity; testRecipient = sender;
+        lastConnectionCheckUtc = connection.LastConnectionCheckUtc; lastTestAcceptedUtc = connection.LastTestAcceptedUtc;
+        checkedConnection = lastConnectionCheckUtc is not null; testedSender = lastTestAcceptedUtc is not null; confirmed = false; settingsSaved = true; status = api.MicrosoftSetupIssue;
+    }
+    private Task SaveConnectionAsync() => RunAsync("Saving test connection…", async () => {
+        if (!checkedConnection || !testedSender) throw new InvalidOperationException("Check connection and send a successful test before saving.");
+        await StoreInputsAsync();
+        var connection = new MailProviderConnection(editingConnectionId ?? Guid.NewGuid(), connectionName, Settings(), DateTimeOffset.UtcNow, lastConnectionCheckUtc, lastTestAcceptedUtc);
+        await Connections.SaveAsync(connection, lifetime.Token); editingConnectionId = connection.Id; settingsSaved = true;
+        await Drafts.ClearAsync(mode, lifetime.Token); savedConnections = await Connections.ListAsync(lifetime.Token);
+        status = "Connection saved for testing. Live mail remains on its current route.";
+    });
+    private async Task ConfigureDirectAsync() { Close(); await ConfigureDirect.InvokeAsync(); }
+    private void Close() { if (!busy) { open = false; clientSecret = accessKey = secretKey = sessionToken = certificatePassword = ""; } }
+    private void MarkUnsaved() => settingsSaved = false;
+    private void Invalidate() { sesSetup = null; settingsSaved = false; checkedConnection = testedSender = confirmed = false; googleState = googleConsentUrl = ""; script = ""; }
+    private async Task ProviderChanged()
+    {
+        Invalidate();
+        MailRelayOutboundSettings? draft;
+        try { draft = await Drafts.GetAsync(mode, lifetime.Token); }
+        catch { status = "Saved setup could not be loaded. Refresh this page before configuring delivery."; return; }
+        api = draft?.Api ?? (Configuration?.Outbound.Mode == mode ? Configuration.Outbound.Api : new());
+        if (!string.IsNullOrWhiteSpace(api.SenderAddress)) sender = api.SenderAddress;
+        tenant = api.TenantId; clientId = api.ClientId; workspace = api.WorkspaceDelegation;
+        awsRole = api.AwsCredentialsSecretReference is null; region = api.Region; identity = api.SendingIdentity;
+        googleState = googleConsentUrl = ""; clientSecret = accessKey = secretKey = sessionToken = certificatePassword = "";
+        status = draft is null ? "" : "Saved setup draft restored. Check connection and send a test before applying it.";
+        uncertainTest = false;
+    }
+    private MailRelayOutboundSettings Settings() => new() { Mode = mode, DestinationPort = 443, Api = api with { MicrosoftMailboxObjectId = string.Equals(sender.Trim(), api.SenderAddress, StringComparison.OrdinalIgnoreCase) && tenant.Trim() == api.TenantId && clientId.Trim() == api.ClientId ? api.MicrosoftMailboxObjectId : "", SenderAddress = sender.Trim(), TenantId = tenant.Trim(), ClientId = clientId.Trim(), WorkspaceDelegation = workspace, Region = region.Trim(), SendingIdentity = identity.Trim(), AwsCredentialsSecretReference = awsRole ? null : api.AwsCredentialsSecretReference } };
+    private async Task StoreInputsAsync()
+    {
+        api = Settings().Api;
+        if (!string.IsNullOrEmpty(clientSecret)) { api = api with { ClientSecretReference = await Secrets.StoreSecretAsync(clientSecret, "Mail Relay provider application credential", lifetime.Token), CertificateSecretReference = mode == MailRelayOutboundMode.MicrosoftGraph ? null : api.CertificateSecretReference }; clientSecret = ""; }
+        if (!awsRole && (!string.IsNullOrEmpty(accessKey) || !string.IsNullOrEmpty(secretKey)))
+        {
+            if (string.IsNullOrWhiteSpace(accessKey) || string.IsNullOrWhiteSpace(secretKey)) throw new InvalidOperationException("Enter both AWS access key and secret key.");
+            api = api with { AwsCredentialsSecretReference = await Secrets.StoreSecretAsync(JsonSerializer.Serialize(new AwsMailCredentials(accessKey, secretKey, string.IsNullOrEmpty(sessionToken) ? null : sessionToken)), "Mail Relay AWS credential", lifetime.Token) };
+            accessKey = secretKey = sessionToken = "";
+        }
+    }
+    private async Task SaveDraftAsync() => await Drafts.SaveAsync(Settings(), lifetime.Token);
+    private async Task RunAsync(string progress, Func<Task> action)
+    {
+        if (busy) return; busy = true; status = progress; await InvokeAsync(StateHasChanged);
+        try { await action(); }
+        catch (OperationCanceledException) when (lifetime.IsCancellationRequested) { }
+        catch (OperationCanceledException) { status = "Registration cancelled. Live mail was not changed."; }
+        catch (Exception exception) when (exception is InvalidOperationException or FormatException) { status = exception.Message; }
+        catch { status = "This step could not be completed. Check the provider configuration and try again. Stored credentials have not been displayed."; }
+        finally { busy = false; }
+    }
+    private string microsoftStage = "";
+    private bool MicrosoftSetupIncomplete => mode == MailRelayOutboundMode.MicrosoftGraph && guided &&
+        (!Guid.TryParse(tenant, out _) || !Guid.TryParse(clientId, out _) ||
+         (api.CertificateSecretReference is null && api.ClientSecretReference is null) ||
+         (api.MicrosoftSetupStage is MicrosoftMailSetupStage.ApplicationRegistered or MicrosoftMailSetupStage.ExchangeAuthenticated) ||
+         (!string.IsNullOrEmpty(api.MicrosoftRegistrationMailbox) && !string.Equals(sender.Trim(), api.SenderAddress, StringComparison.OrdinalIgnoreCase)));
+    private Task PrepareMicrosoftAsync() => RunAsync("Preparing a protected application certificate…", async () => {
+        Invalidate();
+        if (!MailAddress.TryCreate(sender, out var mailbox) || mailbox.Address != sender.Trim()) throw new InvalidOperationException("Enter the sender mailbox first.");
+        clientSecret = "";
+        api = api with { ClientSecretReference = null };
+        var registeredMailbox = api.SenderAddress;
+        var registrationMailbox = string.IsNullOrEmpty(api.MicrosoftRegistrationMailbox) ? sender.Trim() : api.MicrosoftRegistrationMailbox;
+        if (!string.Equals(sender.Trim(), registeredMailbox, StringComparison.OrdinalIgnoreCase))
+            api = api with { CertificateSecretReference = null };
+        if (api.CertificateSecretReference is { } previousReference)
+        {
+            var previousValue = await Secrets.ResolveSecretAsync(previousReference, lifetime.Token);
+            if (previousValue is null) api = api with { CertificateSecretReference = null };
+            else
+            {
+                using var previous = X509CertificateLoader.LoadPkcs12(Convert.FromBase64String(previousValue), null);
+                if (previous.NotAfter.ToUniversalTime() <= DateTime.UtcNow.AddDays(30)) api = api with { CertificateSecretReference = null };
+            }
+        }
+        if (api.CertificateSecretReference is null)
+        {
+            tenant = clientId = "";
+            api = api with { TenantId = "", ClientId = "", MicrosoftServicePrincipalId = "", MicrosoftSetupStage = MicrosoftMailSetupStage.None, MicrosoftMailboxObjectId = "" };
+            registrationMailbox = sender.Trim();
+            using var key = RSA.Create(3072); var request = new CertificateRequest("CN=LMS Mail", key, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+            using var cert = request.CreateSelfSigned(DateTimeOffset.UtcNow.AddMinutes(-5), DateTimeOffset.UtcNow.AddYears(1));
+            api = api with { CertificateSecretReference = await Secrets.StoreSecretAsync(Convert.ToBase64String(cert.Export(X509ContentType.Pkcs12)), "Mail Relay Microsoft application certificate", lifetime.Token) };
+        }
+        api = api with { SenderAddress = sender.Trim(), MicrosoftRegistrationMailbox = registrationMailbox };
+        await SaveDraftAsync();
+        var encoded = await Secrets.ResolveSecretAsync(api.CertificateSecretReference, lifetime.Token);
+        using var certificate = X509CertificateLoader.LoadPkcs12(Convert.FromBase64String(encoded!), null);
+        var resume = Guid.TryParse(tenant, out _) && Guid.TryParse(clientId, out _) && Guid.TryParse(api.MicrosoftServicePrincipalId, out _);
+        script = MailProviderSetupGuidance.Microsoft(resume ? tenant : "", registrationMailbox, Convert.ToBase64String(certificate.RawData), resume ? clientId : "", resume ? api.MicrosoftServicePrincipalId : "");
+        var snapshot = Settings();
+        using var registration = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
+        registrationCancellation = registration; microsoftDeviceCode = registrationCopyStatus = microsoftStage = "";
+        try
+        {
+            var result = await MicrosoftRegistration.RegisterAsync(script, update =>
+            {
+                _ = InvokeAsync(() => { status = update.Message; microsoftStage = update.Stage; microsoftDeviceCode = update.DeviceCode ?? ""; registrationCopyStatus = ""; StateHasChanged(); });
+            }, async (checkpoint, cancellation) =>
+            {
+                snapshot = snapshot with { Api = snapshot.Api with { TenantId = checkpoint.TenantId, ClientId = checkpoint.ClientId,
+                    MicrosoftServicePrincipalId = checkpoint.ServicePrincipalId, MicrosoftRegistrationMailbox = registrationMailbox,
+                    SenderAddress = string.IsNullOrEmpty(checkpoint.SenderAddress) ? snapshot.Api.SenderAddress : checkpoint.SenderAddress,
+                    MicrosoftMailboxObjectId = string.IsNullOrEmpty(checkpoint.MailboxObjectId) ? snapshot.Api.MicrosoftMailboxObjectId : checkpoint.MailboxObjectId,
+                    MicrosoftSetupStage = checkpoint.Stage, MicrosoftSetupIssue = checkpoint.Issue, MicrosoftSetupDiagnostic = checkpoint.Diagnostic } };
+                using var scope = ServiceScopes.CreateScope();
+                await scope.ServiceProvider.GetRequiredService<MailProviderSetupDraftStore>().SaveAsync(snapshot, cancellation);
+                if (!lifetime.IsCancellationRequested)
+                    await InvokeAsync(() => { tenant = checkpoint.TenantId; clientId = checkpoint.ClientId; api = snapshot.Api; sender = api.SenderAddress; StateHasChanged(); });
+            }, registration.Token);
+            tenant = result.TenantId; clientId = result.ClientId;
+            api = api with { TenantId = tenant, ClientId = clientId, SenderAddress = sender.Trim(), MicrosoftServicePrincipalId = result.ServicePrincipalId, MicrosoftRegistrationMailbox = registrationMailbox, MicrosoftSetupStage = MicrosoftMailSetupStage.MailboxAuthorised, MicrosoftSetupIssue = "", MicrosoftSetupDiagnostic = "" };
+            await SaveDraftAsync();
+            status = string.Equals(registrationMailbox, sender, StringComparison.OrdinalIgnoreCase)
+                ? "Mailbox permissions verified. Check connection, then send a test."
+                : $"Exchange resolved {registrationMailbox} to the primary sending address {sender}. Mailbox permissions verified. Messages will use {sender}. Check connection, then send a test.";
+        }
+        finally { registrationCancellation = null; microsoftDeviceCode = ""; }
+    });
+    private async Task CopyMicrosoftCodeAsync()
+    {
+        if (string.IsNullOrEmpty(microsoftDeviceCode)) return;
+        try { await Js.InvokeVoidAsync("navigator.clipboard.writeText", microsoftDeviceCode); registrationCopyStatus = "Code copied."; }
+        catch (JSException) { registrationCopyStatus = "Select and copy the code shown above."; }
+    }
+    private void CancelMicrosoftRegistration() => registrationCancellation?.Cancel();
+    private Task ImportMicrosoftCertificateAsync(Microsoft.AspNetCore.Components.Forms.InputFileChangeEventArgs args) => RunAsync("Encrypting the application certificate…", async () => {
+        Invalidate();
+        try
+        {
+            using var buffer = new MemoryStream();
+            await args.File.OpenReadStream(65536, lifetime.Token).CopyToAsync(buffer, lifetime.Token);
+            using var certificate = X509CertificateLoader.LoadPkcs12(buffer.ToArray(), certificatePassword, X509KeyStorageFlags.EphemeralKeySet);
+            using var key = certificate.GetRSAPrivateKey();
+            if (key is null || key.KeySize < 2048 || certificate.NotAfter.ToUniversalTime() <= DateTime.UtcNow || certificate.NotBefore.ToUniversalTime() > DateTime.UtcNow)
+                throw new InvalidOperationException("Use a valid RSA application certificate with its private key (2048 bits or larger).");
+            api = api with { CertificateSecretReference = await Secrets.StoreSecretAsync(Convert.ToBase64String(certificate.Export(X509ContentType.Pkcs12)), "Mail Relay Microsoft application certificate", lifetime.Token), ClientSecretReference = null };
+            clientSecret = ""; await SaveDraftAsync(); status = "Certificate stored securely. Check connection, then send a test.";
+        }
+        catch (CryptographicException) { throw new InvalidOperationException("The certificate could not be opened. Check its password and that the file contains the private key."); }
+        finally { certificatePassword = ""; }
+    });
+    private Task PrepareAmazonAsync() => RunAsync("Preparing SES identity with your AWS account…", async () => {
+        Invalidate();
+        await StoreInputsAsync(); await SaveDraftAsync();
+        sesSetup = await SesSetup.PrepareSesAsync(Settings(), lifetime.Token);
+        status = sesSetup.Verified ? "SES identity is verified. Check connection, then send a test." : "SES identity prepared. Complete the verification shown below, then check connection.";
+    });
+    private Task ReuseMicrosoftAsync() => RunAsync("Loading the existing Microsoft application settings…", async () => {
+        var existing = await Messaging.GetAsync(lifetime.Token);
+        tenant = existing.GraphTenantId; clientId = existing.GraphClientId; sender = existing.SenderAddress;
+        var existingSecret = string.IsNullOrWhiteSpace(existing.GraphClientSecretReference) ? null : await Secrets.ResolveSecretAsync(existing.GraphClientSecretReference, lifetime.Token);
+        if (string.IsNullOrWhiteSpace(existingSecret)) throw new InvalidOperationException("Existing Microsoft settings have no readable application credential. Enter your own settings or use guided registration.");
+        api = api with { ClientSecretReference = await Secrets.StoreSecretAsync(existingSecret, "Mail Relay Microsoft application credential", lifetime.Token), CertificateSecretReference = null }; await SaveDraftAsync(); Invalidate(); status = "Existing Microsoft settings selected. Stored credentials stay encrypted. Check connection, then send a test.";
+    });
+    private Task ConnectGoogleAsync() => RunAsync("Preparing Google consent…", async () => {
+        Invalidate();
+        await StoreInputsAsync(); await SaveDraftAsync();
+        if (string.IsNullOrWhiteSpace(clientId) || api.ClientSecretReference is null) throw new InvalidOperationException("Enter your Google OAuth client ID and secret first.");
+        var consent = Google.Begin(owner, Settings().Api, Callback); googleState = consent.State;
+        googleConsentUrl = consent.Url; status = "Continue to Google using the button below, complete consent, then return here and check the connection.";
+    });
+    private Task ImportServiceAccountAsync(Microsoft.AspNetCore.Components.Forms.InputFileChangeEventArgs args) => RunAsync("Encrypting the service-account key…", async () => {
+        await using var stream = args.File.OpenReadStream(65536, lifetime.Token); using var reader = new StreamReader(stream); var json = await reader.ReadToEndAsync(lifetime.Token);
+        using var document = JsonDocument.Parse(json);
+        if (document.RootElement.GetProperty("type").GetString() != "service_account" || document.RootElement.GetProperty("token_uri").GetString() != "https://oauth2.googleapis.com/token") throw new InvalidOperationException("Upload a Google service-account JSON key.");
+        api = api with { ServiceAccountSecretReference = await Secrets.StoreSecretAsync(json, "Mail Relay Workspace delegated key", lifetime.Token) }; await SaveDraftAsync(); Invalidate(); status = "Service-account key stored securely. Check Workspace delegation before testing.";
+    });
+    private Task CheckAsync() => RunAsync("Checking provider authentication…", async () => {
+        if (MicrosoftSetupIncomplete) throw new InvalidOperationException("Complete Microsoft registration above before checking the connection. Saved application details are retained.");
+        await StoreInputsAsync(); await SaveDraftAsync();
+        if (!string.IsNullOrEmpty(googleState))
+        {
+            var connected = Google.GetConnected(owner, googleState);
+            if (connected is null) throw new InvalidOperationException("Complete Google consent first, then check the connection.");
+            api = connected; clientId = api.ClientId; sender = api.SenderAddress; googleState = ""; await SaveDraftAsync();
+        }
+        var result = await Provider.CheckAsync(Settings(), lifetime.Token); checkedConnection = result.Outcome == MailDeliveryOutcome.Accepted; lastConnectionCheckUtc = checkedConnection ? DateTimeOffset.UtcNow : null; status = result.Detail;
+    });
+    private Task TestAsync() => RunAsync("Submitting the test message…", async () => {
+        if (string.IsNullOrWhiteSpace(testRecipient)) testRecipient = sender;
+        if (!MailAddress.TryCreate(testRecipient, out var recipient)) throw new InvalidOperationException("Enter a valid test recipient.");
+        var mime = OtpEmailHeaders.BuildMime(sender, "Linux Made Sane", recipient.Address, "LMS delivery test", "<p>LMS outbound delivery test.</p>", DateTimeOffset.UtcNow.AddHours(1));
+        var result = await Provider.SendAsync(Settings(), new(Guid.NewGuid().ToString("N"), sender, [recipient.Address], Encoding.UTF8.GetBytes(mime)), lifetime.Token);
+        uncertainTest = result.Outcome == MailDeliveryOutcome.Indeterminate; testedSender = result.Outcome == MailDeliveryOutcome.Accepted; lastTestAcceptedUtc = testedSender ? DateTimeOffset.UtcNow : null; status = result.Detail;
+    });
+    private Task ActivateAsync() => RunAsync("Reviewing the relay configuration…", async () => {
+        if (!checkedConnection || !testedSender || !confirmed || !settingsSaved || editingConnectionId is null) throw new InvalidOperationException("Check connection, send a successful test and confirm the delivery route before saving.");
+        await StoreInputsAsync(); await SaveDraftAsync();
+        await Connections.PreserveLiveAsync(Configuration, lifetime.Token);
+        var domain = new MailAddress(sender).Host; var request = new MailRelaySetupRequest("", hostname, domain, "lms", "LMS applications", "lms-app", true, false) { Outbound = Settings() };
+        if (Configuration is { } configured) request = request with { AllowTailscale = configured.AllowTailscale, AllowTrustedLan = configured.AllowTrustedLan };
+        var preview = await Relay.PreviewSetupAsync(request, lifetime.Token);
+        if (!preview.CanInstall) throw new InvalidOperationException(string.Join(" ", preview.Errors));
+        job = await Relay.StartProvisioningAsync(preview.Request, lifetime.Token);
+        while (!job.IsTerminal)
+        {
+            status = job.Summary; await InvokeAsync(StateHasChanged); await Task.Delay(1000, lifetime.Token);
+            job = Relay.GetProvisioningJob(job.Id) ?? throw new InvalidOperationException("Setup status could not be read. Refresh the relay page to resume viewing progress.");
+        }
+        status = job.Summary; if (job.Result?.Success == true) await Drafts.ClearAsync(mode, lifetime.Token); await Changed.InvokeAsync(); await RefreshAsync();
+    });
+    private void RequestRetry(MailDeliveryReceipt receipt) { retryReceipt = receipt; retryConfirmed = false; pageStatus = ""; }
+    private void CancelRetry() { if (!busy) retryReceipt = null; }
+    private async Task ConfirmRetryAsync() { if (retryConfirmed && retryReceipt is not null) { await ResolveAsync(retryReceipt, false); retryReceipt = null; } }
+    private async Task ResolveAsync(MailDeliveryReceipt receipt, bool accepted)
+    {
+        busy = true; pageStatus = "Updating delivery status…";
+        try { await Receipts.ResolveAsync(receipt.Key, accepted, lifetime.Token); pageStatus = "Resolution saved. The existing Postfix queue will apply it at its next scheduled attempt."; await RefreshAsync(); }
+        catch (InvalidOperationException exception) { pageStatus = exception.Message; }
+        catch { pageStatus = "Delivery status could not be saved. Refresh and check it before trying again."; }
+        finally { busy = false; }
+    }
+    private static string ProviderName(MailRelayOutboundMode value) => value switch { MailRelayOutboundMode.MicrosoftGraph => "Microsoft 365", MailRelayOutboundMode.Gmail => "Gmail", MailRelayOutboundMode.AmazonSes => "Amazon SES", _ => "LMS / Edge Gateway" };
+    private static string OutcomeName(MailDeliveryOutcome outcome) => outcome switch { MailDeliveryOutcome.Indeterminate => "Acceptance unconfirmed", MailDeliveryOutcome.AuthenticationFailure => "Reconnect provider", MailDeliveryOutcome.ConfigurationFailure => "Review provider settings", MailDeliveryOutcome.TemporaryFailure => "Queued for retry", _ => "Message rejected" };
+    public void Dispose() { lifetime.Cancel(); lifetime.Dispose(); }
+}

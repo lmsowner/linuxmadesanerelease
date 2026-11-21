@@ -1,0 +1,222 @@
+@* Copyright (c) 2026 LMS Developer. All rights reserved.
+   Applicable licence and release scope: see LICENSE.md for details. *@
+@using LinuxMadeSane.Application.Contracts.RdpOptimizer
+@using LinuxMadeSane.Application.Interfaces
+@using LinuxMadeSane.Core.Enums
+@using LinuxMadeSane.Core.Models.RdpOptimizer
+@implements IAsyncDisposable
+@inject IRdpOptimizationService DesktopService
+@inject DesktopSetupOperations Operations
+@inject DesktopHostSessions HostSessions
+@inject DesktopHelperRepair HelperRepair
+
+<section class="surface-card desktop-management">
+    <div class="desktop-heading">
+        <div><h2>Desktop Setup</h2><p class="meta-text">Choose GNOME, XFCE or KDE Plasma for your users.</p></div>
+        <CompactUIButton Label="Refresh" Glyph="UiIconGlyph.Refresh" Disabled="@busy" OnClick="LoadAsync" />
+    </div>
+    <div class="desktop-toolbar">
+        @if (workspace?.Inspection.InstalledDesktopEnvironments.Count > 0)
+        { <DesktopViewButton HostId="LinuxMadeSane.Core.Models.Ai.AiLocalMachine.ManagedHostId" /> }
+        <span class="meta-text">View desktop opens the current desktop through VNC.</span>
+    </div>
+    <p class="meta-text"><strong>Screen-sharing permission:</strong> @LinuxMadeSane.Web.Services.RemoteDesktop.LmsDesktopAccess.WaylandSharingInstructions</p>
+    <div class="desktop-row-actions"><CompactUIButton Label="Repair Desktop Helper" Glyph="UiIconGlyph.Repair" Disabled="@(busy || repairing)" OnClick="RepairHelperAsync" /><span class="meta-text">Restore helper files, reconnect to this desktop and open its window.</span></div>
+    @if (!string.IsNullOrEmpty(helperFeedback)) { <div class="desktop-feedback @(helperFailed ? "error" : "")" role="status" aria-live="polite">@helperFeedback</div> }
+    @if (!string.IsNullOrWhiteSpace(feedback))
+    {
+        <div class="desktop-feedback @(failed ? "error" : "")" role="status" aria-live="polite">@feedback</div>
+    }
+    @if (workspace is null)
+    {
+        <p class="meta-text">Inspecting installed desktops…</p>
+    }
+    else
+    {
+        <div class="desktop-selection">
+            <UiSelectField TValue="RdpOptimizationProfile" Label="Desktop" @bind-Value="selected" Compact="true" Disabled="@busy">
+                @foreach (var profile in profiles) { <option value="@profile">@DesktopSessionCatalog.Marker(profile)@(workspace.Inspection.InstalledDesktopEnvironments.Contains(DesktopSessionCatalog.Marker(profile)) ? "" : " (not installed)")</option> }
+            </UiSelectField>
+            <UiSelectField TValue="string" Label="Users" @bind-Value="userScope" Compact="true" Disabled="@busy">
+                <option value="all">All existing users (@users.Count)</option><option value="selected">Selected users</option>
+            </UiSelectField>
+        </div>
+        @if (userScope == "selected")
+        {
+            <fieldset class="desktop-user-selection"><legend>Which users should use @DesktopSessionCatalog.Marker(selected)?</legend>
+                @foreach (var user in users)
+                {
+                    <label><input type="checkbox" checked="@selectedUsers.Contains(user)" disabled="@busy" @onchange="@((ChangeEventArgs e) => SelectUser(user, e.Value is true))" /> @user</label>
+                }
+                @if (users.Count == 0) { <span>No eligible Linux accounts were found.</span> }
+            </fieldset>
+        }
+        <p class="meta-text">Save your work, then sign out and sign in to use the chosen desktop. Existing sessions stay open.</p>
+        <p class="meta-text">@SelectionSummary()</p>
+        <div class="desktop-row-actions">
+            <CompactUIButton Label="@(workspace.Inspection.InstalledDesktopEnvironments.Contains(DesktopSessionCatalog.Marker(selected)) ? "Use " + DesktopSessionCatalog.Marker(selected) : "Install and use " + DesktopSessionCatalog.Marker(selected))"
+                Glyph="UiIconGlyph.Connect" Disabled="@(busy || TargetUsers().Length == 0)" OnClick="ApplyAsync" />
+            <CompactUIButton Label="@($"Repair {DesktopSessionCatalog.Marker(selected)}")" Glyph="UiIconGlyph.Repair"
+                Disabled="@(busy || TargetUsers().Length == 0)" OnClick="RepairDesktopAsync" />
+        </div>
+        <p class="meta-text">Repair backs up the current configuration, restores desktop files and fixes login settings. User files and other desktops are kept. Save work before repair, then restart the machine when it finishes.</p>
+        @if (!string.IsNullOrWhiteSpace(feedback))
+        { <div class="desktop-feedback @(failed ? "error" : "")" role="status" aria-live="polite">@feedback</div> }
+        @if (operationResult is not null)
+        {
+            <details class="desktop-details" open="@(!operationResult.Success)">
+                <summary>@(operationResult.DryRun ? "Preview changes" : "Operation log") · @(operationResult.Success ? "Completed" : "Needs attention")</summary>
+                @if (operationResult.DryRun)
+                {
+                    <pre>@string.Join("\n", operationResult.Plan.PackageActions.Select(a => a.PlannedCommand).Concat(operationResult.Plan.ServiceActions.Select(a => a.PlannedCommand)).Concat(operationResult.Plan.SessionChanges.Select(c => c.Description)))</pre>
+                }
+                <pre>@string.Join("\n", operationResult.OperationLogs.Select(log => $"{log.Level}: {log.Message} {log.StandardError}"))</pre>
+            </details>
+        }
+        <div class="desktop-heading"><h3>Active desktop sessions</h3><CompactUIButton Label="Refresh sessions" Disabled="@busy" OnClick="LoadSessionsAsync" /></div>
+        <p class="meta-text">A session showing the selected desktop confirms that it has started. Save your work before ending an old session.</p>
+        @if (!string.IsNullOrEmpty(sessionFeedback)) { <p class="desktop-feedback" role="status">@sessionFeedback</p> }
+        <table class="desktop-table"><thead><tr><th>User</th><th>Desktop</th><th>State</th><th></th></tr></thead><tbody>
+            @foreach (var session in sessions)
+            {
+                <tr><td>@session.User</td><td>@session.Desktop · @session.Type</td><td>@session.State</td>
+                    <td><CompactUIButton Label="End session" Glyph="UiIconGlyph.Stop" Disabled="@busy" OnClick="@(() => ending = session)" /></td></tr>
+            }
+            @if (sessions.Count == 0) { <tr><td colspan="4">No graphical user sessions are running.</td></tr> }
+        </tbody></table>
+        <details class="desktop-details"><summary>Restore previous configuration (@(workspace?.Snapshots.Count ?? 0) snapshots)</summary>
+            <p class="meta-text">Restores session files and service state. Installed packages are retained. A restore may disconnect desktop sessions.</p>
+            @foreach (var snapshot in (workspace?.Snapshots ?? []).Take(5))
+            {
+                <div class="desktop-snapshot"><span>@snapshot.CreatedAt.ToLocalTime().ToString("g") · @DesktopSessionCatalog.Marker(snapshot.ProfileApplied)</span>
+                    <CompactUIButton Label="Restore" Disabled="@busy" OnClick="@(() => restoring = snapshot.SnapshotId)" /></div>
+            }
+        </details>
+    }
+</section>
+<UiModal IsOpen="@(ending is not null || restoring is not null)" Title="@(ending is not null ? "End this desktop session?" : "Restore desktop configuration?")" OnClose="CloseDialog">
+    <ChildContent><p>@(ending is not null ? $"End {ending.User}’s {ending.Desktop} session? Unsaved work will be lost. Their next new connection will use the configured desktop." : "Restore the selected snapshot’s session configuration and service state? This can disconnect active desktop sessions. Installed packages are retained.")</p></ChildContent>
+    <Footer><CompactUIButton Label="Cancel" Glyph="UiIconGlyph.Clear" OnClick="CloseDialog" /><CompactUIButton Label="Confirm" Glyph="UiIconGlyph.Connect" Disabled="@busy" OnClick="ConfirmDialogAsync" /></Footer>
+</UiModal>
+
+@code {
+    [Parameter] public EventCallback OnChanged { get; set; }
+    private static readonly RdpOptimizationProfile[] profiles = [RdpOptimizationProfile.RdpOptimizedXfce, RdpOptimizationProfile.GnomeDesktop, RdpOptimizationProfile.KdePlasmaDesktop];
+    private RdpOptimizerWorkspaceViewModel? workspace;
+    private RdpOptimizationProfile selected = RdpOptimizationProfile.RdpOptimizedXfce;
+    private string userScope = "all", feedback = "", sessionFeedback = "";
+    private readonly HashSet<string> selectedUsers = new(StringComparer.Ordinal);
+    private IReadOnlyList<string> users = [];
+    private IReadOnlyList<HostDesktopSession> sessions = [];
+    private HostDesktopSession? ending;
+    private Guid? restoring;
+    private bool busy, failed, repairing, helperFailed, hasLoadedSelection;
+    private string helperFeedback = "";
+    private async Task RepairHelperAsync()
+    {
+        repairing = true; helperFailed = false; helperFeedback = "Checking helper files, reconnecting to your desktop and opening the helper window…"; StateHasChanged();
+        try { helperFeedback = await HelperRepair.RepairAsync(lifetime.Token); await OnChanged.InvokeAsync(); }
+        catch (OperationCanceledException) when (lifetime.IsCancellationRequested) { }
+        catch (Exception error) { helperFailed = true; helperFeedback = "Repair failed: " + error.Message; }
+        finally { repairing = false; }
+    }
+    private RdpOptimizationResult? operationResult;
+    private readonly CancellationTokenSource lifetime = new();
+    private Task? polling;
+    private DesktopSetupOperation? lastOperation;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadAsync();
+        polling = PollAsync();
+    }
+    private async Task LoadAsync()
+    {
+        try
+        {
+            workspace = await DesktopService.GetWorkspaceAsync();
+            users = HostSessions.Users();
+            try
+            {
+                if (File.Exists("/etc/linuxmadesane/local-desktop"))
+                {
+                    using var saved = System.Text.Json.JsonDocument.Parse(await File.ReadAllTextAsync("/etc/linuxmadesane/local-desktop"));
+                    if (saved.RootElement.ValueKind != System.Text.Json.JsonValueKind.Object) throw new System.Text.Json.JsonException();
+                    if (!hasLoadedSelection && saved.RootElement.TryGetProperty("Profile", out var profile) && profile.TryGetInt32(out var id) && profiles.Contains((RdpOptimizationProfile)id))
+                        selected = (RdpOptimizationProfile)id;
+                }
+            }
+            catch (System.Text.Json.JsonException)
+            { feedback = "Saved desktop preferences are missing or damaged. Choose the desktop and select Repair to restore them."; failed = true; }
+            hasLoadedSelection = true;
+            await LoadSessionsAsync();
+        }
+        catch (Exception error) { feedback = error.Message; failed = true; }
+        UpdateOperation();
+    }
+    private async Task LoadSessionsAsync()
+    {
+        try { sessions = await HostSessions.ListAsync(lifetime.Token); sessionFeedback = ""; }
+        catch (Exception error) when (error is not OperationCanceledException) { sessionFeedback = "Could not inspect graphical sessions: " + error.Message; }
+    }
+    private void SelectUser(string user, bool value) { if (value) selectedUsers.Add(user); else selectedUsers.Remove(user); }
+    private string[] TargetUsers() => (userScope == "all" ? users : users.Where(selectedUsers.Contains)).ToArray();
+    private string SelectionSummary() => $"{DesktopSessionCatalog.Marker(selected)} · {(userScope == "all" ? "All existing users: " + string.Join(", ", users) : "Selected users: " + (TargetUsers().Length == 0 ? "choose at least one user" : string.Join(", ", TargetUsers())))}";
+    private Task ApplyAsync()
+    {
+        if (busy) return Task.CompletedTask;
+        if (TargetUsers().Length == 0)
+        { feedback = "Choose at least one Linux account."; failed = true; return Task.CompletedTask; }
+        try
+        {
+            Operations.Start(new() { Profile = selected, ConfigureRemoteDesktop = false, ConfigureDesktop = true,
+                DesktopUserNames = TargetUsers(), CreateSnapshotBeforeChanges = true, DisableGnomeAutostarts = false });
+            UpdateOperation();
+        }
+        catch (InvalidOperationException error) { feedback = error.Message; failed = true; }
+        return Task.CompletedTask;
+    }
+    private Task RepairDesktopAsync()
+    {
+        if (busy || TargetUsers().Length == 0) return Task.CompletedTask;
+        try
+        {
+            Operations.Start(new() { Profile = selected, ConfigureDesktop = true, RepairDesktop = true,
+                DesktopUserNames = TargetUsers(), CreateSnapshotBeforeChanges = true });
+            UpdateOperation();
+        }
+        catch (InvalidOperationException error) { feedback = error.Message; failed = true; }
+        return Task.CompletedTask;
+    }
+    private void UpdateOperation()
+    {
+        var state = Operations.Current;
+        busy = state.Running;
+        if (ReferenceEquals(lastOperation, state)) return;
+        lastOperation = state;
+        if (!string.IsNullOrEmpty(state.Message)) { feedback = state.Message; failed = !busy && state.Result?.Success != true; }
+        operationResult = state.Result;
+    }
+    private async Task PollAsync()
+    {
+        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(2));
+        try
+        {
+            while (await timer.WaitForNextTickAsync(lifetime.Token))
+                await InvokeAsync(async () => { var wasBusy = busy; UpdateOperation(); if (wasBusy && !busy) { await LoadAsync(); await OnChanged.InvokeAsync(); } StateHasChanged(); });
+        }
+        catch (OperationCanceledException) { }
+    }
+    private void CloseDialog() { ending = null; restoring = null; }
+    private async Task ConfirmDialogAsync()
+    {
+        try
+        {
+            if (ending is { } session) { sessionFeedback = "Ending the selected desktop session…"; await HostSessions.EndAsync(session.Id); await LoadSessionsAsync(); }
+            else if (restoring is { } snapshot) { Operations.Start(new() { Profile = RdpOptimizationProfile.RestoreFullDesktop, SnapshotIdToRestore = snapshot, RestoreRemovedPackages = false }); UpdateOperation(); }
+        }
+        catch (Exception error) { feedback = error.Message; failed = true; }
+        finally { CloseDialog(); }
+    }
+    public async ValueTask DisposeAsync() { lifetime.Cancel(); if (polling is not null) await polling; lifetime.Dispose(); }
+}

@@ -1,0 +1,58 @@
+@* Copyright (c) 2026 LMS Developer. All rights reserved.
+   Applicable licence and release scope: see LICENSE.md for details. *@
+@if (!HasSavedToken)
+{
+    @ChildContent
+}
+else
+{
+    <section class="edge-cloudflare-connection" aria-label="Cloudflare connection">
+        <div class="edge-cloudflare-connection-row">
+            <div>
+                <strong>Cloudflare</strong>
+                <span>@(IsChecking ? "Checking access…" : IsAvailable ? "Connected · token saved securely" : "Saved token needs attention")</span>
+            </div>
+            <div class="edge-cloudflare-connection-actions">
+                <UiCommandButton Label="Update token" Glyph="UiIconGlyph.Edit" Variant="UiButtonVariant.Ghost" OnClick="OpenEditorAsync" />
+                @Actions
+            </div>
+        </div>
+        @if (!IsAvailable && !IsChecking && !string.IsNullOrWhiteSpace(ConnectionMessage))
+        {
+            <p class="edge-cloudflare-connection-feedback" role="status">@ConnectionMessage</p>
+        }
+        @if (!showTokenEditor && !string.IsNullOrWhiteSpace(ActionMessage))
+        {
+            <p class="edge-cloudflare-connection-feedback @(ActionIsError ? "error" : "success")" role="status">@ActionMessage</p>
+        }
+    </section>
+}
+<div class="edge-cloudflare-token-dialog-host">
+    <UiModal IsOpen="@(HasSavedToken && showTokenEditor)" Title="Update Cloudflare token"
+             Subtitle="Your existing token stays in place unless the replacement passes the access checks."
+             CloseOnBackdrop="false" OnClose="CloseEditorAsync">
+        <ChildContent>@ChildContent</ChildContent>
+        <Footer><UiCommandButton Label="Done" Glyph="UiIconGlyph.Clear" Variant="UiButtonVariant.Ghost" Disabled="@Busy" OnClick="CloseEditorAsync" /></Footer>
+    </UiModal>
+</div>
+@code {
+    [Parameter] public bool HasSavedToken { get; set; }
+    [Parameter] public bool IsAvailable { get; set; }
+    [Parameter] public bool IsChecking { get; set; }
+    [Parameter] public bool Busy { get; set; }
+    [Parameter] public string? ConnectionMessage { get; set; }
+    [Parameter] public string? ActionMessage { get; set; }
+    [Parameter] public bool ActionIsError { get; set; }
+    [Parameter] public RenderFragment? ChildContent { get; set; }
+    [Parameter] public RenderFragment? Actions { get; set; }
+    [Parameter] public EventCallback OnEditorOpened { get; set; }
+    [Parameter] public EventCallback OnEditorClosed { get; set; }
+    private bool showTokenEditor;
+    private async Task OpenEditorAsync() { await OnEditorOpened.InvokeAsync(); showTokenEditor = true; }
+    private async Task CloseEditorAsync()
+    {
+        if (Busy) return;
+        showTokenEditor = false;
+        await OnEditorClosed.InvokeAsync();
+    }
+}

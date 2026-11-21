@@ -1,0 +1,145 @@
+@* Copyright (c) 2026 LMS Developer. All rights reserved.
+   Applicable licence and release scope: see LICENSE.md for details. *@
+@using System.Net
+@using System.Net.NetworkInformation
+@using LinuxMadeSane.Application.Interfaces
+@using LinuxMadeSane.Core.Abstractions
+@using LinuxMadeSane.Web.Services
+@inject ISshAdminService SshAdmin
+@inject IPublicIpAddressDiscoveryService PublicIpDiscovery
+@inject NavigationManager Navigation
+@inject IJSRuntime JSRuntime
+
+<div class="ssh-client-connection-guide">
+    @if (loading)
+    {
+        <p class="meta-text" role="status">Reading this server's SSH addresses and port…</p>
+    }
+    else
+    {
+        @if (!string.IsNullOrWhiteSpace(connectionMessage)) { <p class="meta-text" role="status">@connectionMessage</p> }
+        @if (checkingPublicIp) { <p class="meta-text" role="status">Checking the public IP from this server…</p> }
+        else if (!string.IsNullOrWhiteSpace(publicIpMessage)) { <p class="meta-text" role="status">@publicIpMessage</p> }
+        <div class="ssh-client-address-fields">
+            <label>SSH address
+                <select value="@selectedHost" @onchange="SelectHost">
+                    @foreach (var target in targets) { <option value="@target.Host">@target.Label</option> }
+                    <option value="">Another SSH hostname or IP address</option>
+                </select>
+            </label>
+            <label>SSH port
+                <input type="number" min="1" max="65535" @bind="selectedPort" @bind:after="ClearCopyStatus" list="@portListId" />
+                <datalist id="@portListId">@foreach (var port in availablePorts) { <option value="@port"></option> }</datalist>
+            </label>
+        </div>
+        @if (string.IsNullOrEmpty(selectedHost))
+        {
+            <label>Hostname or IP address<input type="text" @bind="customHost" @bind:event="oninput" @bind:after="ClearCopyStatus" placeholder="Enter the server's SSH address" /></label>
+        }
+        @if (targets.FirstOrDefault(target => target.Host == selectedHost)?.IsDiscoveredPublicAddress == true)
+        {
+            <p class="meta-text">This is the server's detected public egress IP. Your client must be able to reach this IP on the selected SSH port. NAT, VPN or firewall rules may require a different inbound address or port.</p>
+        }
+        @if (!ShowCommand)
+        {
+            <p class="meta-text">Use the address and port above in your SSH app, with Linux username <strong>@UserName</strong> and the private identity matching your public key.</p>
+        }
+        else if (Command is { } command)
+        {
+            <pre><code>@command</code></pre>
+            <UiCommandButton Label="Copy SSH command" Glyph="UiIconGlyph.Copy" OnClick="CopyAsync" />
+            @if (!string.IsNullOrWhiteSpace(copyStatus)) { <p class="meta-text" role="status">@copyStatus</p> }
+        }
+        else { <p class="meta-text">Enter an SSH hostname or IP address and a port between 1 and 65535 to show the command.</p> }
+        <p class="meta-text">Your client must be able to reach the selected address on the selected SSH port. Public-IP discovery does not test inbound SSH access. An HTTPS gateway or temporary browser-proxy address is not automatically an SSH endpoint.</p>
+    }
+</div>
+
+@code {
+    [Parameter] public string UserName { get; set; } = "username";
+    [Parameter] public string MachineName { get; set; } = Environment.MachineName;
+    [Parameter] public bool Windows { get; set; }
+    [Parameter] public bool ShowCommand { get; set; } = true;
+    private readonly string portListId = "ssh-client-ports-" + Guid.NewGuid().ToString("N");
+    private IReadOnlyList<SshClientConnectionTarget> targets = [];
+    private IReadOnlyList<int> availablePorts = [];
+    private string selectedHost = string.Empty;
+    private string customHost = string.Empty;
+    private int selectedPort = 22;
+    private bool loading = true;
+    private bool checkingPublicIp;
+    private bool userSelectedHost;
+    private string? publicIpMessage;
+    private string? connectionMessage;
+    private string? copyStatus;
+    private string? Command
+    {
+        get
+        {
+            try { return SshClientConnectionTargets.Command(MachineName, UserName, string.IsNullOrEmpty(selectedHost) ? customHost.Trim() : selectedHost, selectedPort, Windows); }
+            catch (ArgumentException) { return null; }
+        }
+    }
+    protected override async Task OnInitializedAsync()
+    {
+        try
+        {
+            var overview = await SshAdmin.GetOverviewAsync();
+            var browserHost = new Uri(Navigation.Uri).IdnHost;
+            IPAddress[] resolved = [];
+            try { resolved = await Dns.GetHostAddressesAsync(browserHost).WaitAsync(TimeSpan.FromSeconds(2)); } catch { }
+            var names = new Dictionary<string,string>(StringComparer.OrdinalIgnoreCase);
+            try
+            {
+                foreach (var network in NetworkInterface.GetAllNetworkInterfaces())
+                    foreach (var address in network.GetIPProperties().UnicastAddresses)
+                        names.TryAdd(address.Address.ToString(), network.Name);
+            }
+            catch (NetworkInformationException) { }
+            targets = SshClientConnectionTargets.Build(overview, browserHost, resolved, names);
+            selectedHost = targets.FirstOrDefault()?.Host ?? string.Empty;
+            availablePorts = targets.FirstOrDefault()?.Ports ?? overview.EffectiveSettings.Ports;
+            selectedPort = availablePorts.FirstOrDefault(22);
+            if (targets.Count == 0) connectionMessage = "No direct SSH address was reported for this server. Enter the SSH endpoint configured for your network.";
+            if (!overview.IsServiceActive) connectionMessage = "SSH is not currently reported as running on this server. The command uses its reported configuration.";
+            // Offer local addresses immediately while the bounded, server-side discovery runs.
+            loading = false;
+            checkingPublicIp = true;
+            await InvokeAsync(StateHasChanged);
+            try
+            {
+                var discovery = await PublicIpDiscovery.DiscoverAsync();
+                if (discovery.IsAvailable)
+                {
+                    targets = SshClientConnectionTargets.Build(overview, browserHost, resolved, names, discovery.Address);
+                    if (!userSelectedHost && string.IsNullOrEmpty(selectedHost))
+                    {
+                        selectedHost = targets.FirstOrDefault()?.Host ?? string.Empty;
+                        availablePorts = targets.FirstOrDefault()?.Ports ?? overview.EffectiveSettings.Ports;
+                        selectedPort = availablePorts.FirstOrDefault(22);
+                    }
+                }
+                else publicIpMessage = discovery.Message;
+            }
+            catch { publicIpMessage = "The public-IP lookup could not complete. Local interface addresses are still available."; }
+            finally { checkingPublicIp = false; }
+        }
+        catch { connectionMessage = "The server's SSH addresses could not be read. Enter its SSH address and port below."; }
+        finally { loading = false; }
+    }
+    private void ClearCopyStatus() => copyStatus = null;
+    private void SelectHost(ChangeEventArgs args)
+    {
+        userSelectedHost = true;
+        selectedHost = args.Value?.ToString() ?? string.Empty;
+        availablePorts = targets.FirstOrDefault(target => target.Host == selectedHost)?.Ports ?? [];
+        if (availablePorts.Count > 0 && !availablePorts.Contains(selectedPort)) selectedPort = availablePorts[0];
+        copyStatus = null;
+    }
+    private async Task CopyAsync()
+    {
+        if (Command is not { } command) return;
+        var copied = await JSRuntime.InvokeAsync<bool>("lmsClipboard.writeText", command);
+        copyStatus = copied ? "SSH command copied. Run it on your own device." : "Select the SSH command and copy it manually.";
+    }
+}

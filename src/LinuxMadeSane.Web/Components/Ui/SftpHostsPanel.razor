@@ -1,0 +1,133 @@
+@* Copyright (c) 2026 LMS Developer. All rights reserved.
+   Applicable licence and release scope: see LICENSE.md for details. *@
+@using LinuxMadeSane.Application.Interfaces
+@using LinuxMadeSane.Core.Abstractions
+@inject ISavedConnectionCredentialService Credentials
+@inject ISavedCredentialAccessContext Access
+@inject IManagedHostStore Hosts
+@inject IManagedHostFileAccessService Files
+
+<section class="sftp-hosts-panel">
+    <div class="sftp-host-toolbar">
+        <div><strong>Saved SFTP hosts</strong><p class="meta-text">Open a file session to browse, upload, download, copy, move, rename and delete files.</p></div>
+        <div class="sftp-host-actions">
+            <UiCommandButton Label="Add SFTP host" Glyph="UiIconGlyph.Plus" OnClick="Add" Disabled="@(busy || userId is null)" />
+            <UiCommandButton Label="Refresh" Glyph="UiIconGlyph.Refresh" OnClick="RefreshAsync" Disabled="@(busy || userId is null)" />
+        </div>
+    </div>
+    @if (!string.IsNullOrWhiteSpace(message)) { <p class="callout @tone" role="status">@message</p> }
+    @if (userId is null && !loading) { <p class="callout info">Sign in to LMS to manage saved SFTP hosts.</p> }
+    <div class="sftp-host-table-shell">
+        <table class="inventory-table" aria-label="Saved SFTP hosts">
+            <thead><tr><th>Name</th><th>Server</th><th>Port</th><th>Username</th><th>Credentials</th><th>Actions</th></tr></thead>
+            <tbody>
+                @foreach (var host in entries)
+                {
+                    <tr @key="host.Id">
+                        <td><strong>@host.Name</strong></td><td>@host.Server</td><td>@host.Port</td><td>@host.Username</td>
+                        <td><UiCommandButton Label="@(host.HasPrivateKey ? "Public key" : "Password")" Glyph="UiIconGlyph.Key" Variant="UiButtonVariant.Ghost" OnClick="@(() => Edit(host))" Disabled="@busy" /></td>
+                        <td><div class="sftp-host-actions">
+                            <UiCommandButton Label="Open files" Glyph="UiIconGlyph.Files" Href="@($"/file-browser-window?hostId={host.Id}")"
+                                             Target="_blank" Rel="noopener noreferrer" OnClientClick="if(window.lmsTerminalWindow?.openPopup(this.href,this.target))return false;" Disabled="@busy" />
+                            <UiCommandButton Label="Test connection" Glyph="UiIconGlyph.Connect" OnClick="@(() => TestAsync(host))" Disabled="@busy" />
+                            <UiCommandButton Label="Edit" Glyph="UiIconGlyph.Edit" OnClick="@(() => Edit(host))" Disabled="@busy" />
+                            <UiCommandButton Label="Remove" Glyph="UiIconGlyph.Delete" Variant="UiButtonVariant.Danger" OnClick="@(() => ConfirmRemove(host))" Disabled="@busy" />
+                        </div>
+                        @if (operationId == host.Id && !string.IsNullOrWhiteSpace(message)) { <p class="callout @tone" role="status">@message</p> }
+                        </td>
+                    </tr>
+                    @if (pendingDelete?.Id == host.Id)
+                    {
+                        <tr><td colspan="6">
+                            <p>Remove @host.Name and its SFTP credentials from the vault? Files on the server are kept.</p>
+                            <div class="sftp-host-actions"><UiCommandButton Label="Remove SFTP host" Glyph="UiIconGlyph.Delete" Variant="UiButtonVariant.Danger" OnClick="DeleteAsync" Disabled="@busy" /><UiCommandButton Label="Cancel" OnClick="CancelRemove" Disabled="@busy" /></div>
+                        </td></tr>
+                    }
+                }
+                @if (entries.Count == 0) { <tr><td colspan="6">@(loading ? "Loading saved SFTP hosts…" : "No saved SFTP hosts. Add one to connect using the credential vault.")</td></tr> }
+            </tbody>
+        </table>
+    </div>
+</section>
+
+<SavedCredentialsPanel @ref="credentialEditor" EditorOnly="true" FixedKind="ConnectionCredentialKind.Sftp" Saved="CredentialSavedAsync" />
+
+@code {
+    private Guid? userId;
+    private Guid? operationId;
+    private IReadOnlyList<SavedConnectionCredentialSummary> entries = [];
+    private SavedCredentialsPanel? credentialEditor;
+    private SavedConnectionCredentialSummary? pendingDelete;
+    private bool loading = true, busy;
+    private string? message;
+    private string tone = "info";
+
+    protected override async Task OnInitializedAsync()
+    {
+        try { userId = await Access.GetAuthenticatedUserIdAsync(); await LoadAsync(); }
+        catch { SetMessage("Unable to load the SFTP credential vault.", "error"); }
+        finally { loading = false; }
+    }
+    private async Task LoadAsync()
+    {
+        if (userId is Guid user) entries = (await Credentials.ListAsync(user)).Where(entry => entry.Kind == ConnectionCredentialKind.Sftp).ToArray();
+    }
+    private void SetMessage(string text, string severity = "info") { message = text; tone = severity; }
+    private async Task Add()
+    {
+        if (busy || credentialEditor is null) return;
+        pendingDelete = null; message = null;
+        await credentialEditor.OpenCreateAsync(kind: ConnectionCredentialKind.Sftp);
+    }
+    private async Task Edit(SavedConnectionCredentialSummary host)
+    {
+        if (busy || credentialEditor is null) return;
+        pendingDelete = null; message = null;
+        try { await credentialEditor.OpenEditAsync(host.Id); }
+        catch { SetMessage("Unable to open this SFTP credential. Refresh the list and try again.", "error"); }
+    }
+    private async Task CredentialSavedAsync(SavedConnectionCredentialSummary saved)
+    {
+        try { await LoadAsync(); SetMessage("SFTP credentials saved. Open files to start a session.", "success"); }
+        catch { SetMessage("Credentials were saved, but the host list could not refresh. Select Refresh to reload it.", "warning"); }
+    }
+    private async Task RefreshAsync()
+    {
+        if (busy) return;
+        busy = true; SetMessage("Refreshing saved SFTP hosts…");
+        try { await LoadAsync(); SetMessage("SFTP hosts refreshed.", "success"); }
+        catch { SetMessage("Unable to refresh saved SFTP hosts.", "error"); }
+        finally { busy = false; }
+    }
+    private async Task TestAsync(SavedConnectionCredentialSummary entry)
+    {
+        if (busy || userId is not Guid user) return;
+        operationId = entry.Id;
+        busy = true; SetMessage($"Connecting to {entry.Name} over SFTP…");
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        try
+        {
+            // Authorise and audit this vault use without exposing secrets to the browser.
+            _ = await Credentials.ResolveAsync(user, entry.Id, timeout.Token) ?? throw new InvalidOperationException("SFTP credential no longer exists.");
+            var host = await Hosts.GetAsync(entry.Id, timeout.Token) ?? throw new InvalidOperationException("SFTP host no longer exists.");
+            var profile = new ManagedHostConnectionProfile(host.Username, null, true);
+            var home = await Files.GetHomeDirectoryAsync(host, profile, timeout.Token);
+            var files = await Files.ListItemsAsync(host, home, profile, timeout.Token);
+            SetMessage($"{entry.Name}: SFTP authentication and file listing succeeded ({files.Count} items in {home}).", "success");
+        }
+        catch (OperationCanceledException) { SetMessage("SFTP connection test timed out. Check the server and port.", "error"); }
+        catch { SetMessage($"Could not connect to {entry.Name}. Check its SFTP address, credentials and file access permissions.", "error"); }
+        finally { busy = false; }
+    }
+    private void ConfirmRemove(SavedConnectionCredentialSummary entry) { if (!busy) { pendingDelete = entry; message = null; } }
+    private void CancelRemove() { if (!busy) pendingDelete = null; }
+    private async Task DeleteAsync()
+    {
+        if (busy || userId is not Guid user || pendingDelete is null) return;
+        operationId = pendingDelete.Id;
+        busy = true; SetMessage($"Removing {pendingDelete.Name} from the SFTP credential vault…");
+        try { await Credentials.DeleteAsync(user, pendingDelete.Id); pendingDelete = null; await LoadAsync(); SetMessage("SFTP host and its saved credentials removed. Remote files were kept.", "success"); }
+        catch { SetMessage("Unable to remove the saved SFTP host.", "error"); }
+        finally { busy = false; }
+    }
+}

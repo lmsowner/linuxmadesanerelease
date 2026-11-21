@@ -1,0 +1,133 @@
+@* Copyright (c) 2026 LMS Developer. All rights reserved.
+   Applicable licence and release scope: see LICENSE.md for details. *@
+@page "/settings/licensing"
+@rendermode InteractiveServer
+@using LinuxMadeSane.Core.Licensing
+@using LinuxMadeSane.Web.Services.Licensing
+@using Microsoft.AspNetCore.Components.Authorization
+@inject NavigationManager Navigation
+@inject IJSRuntime JS
+@inject LocalLicensingService Service
+@inject LinuxMadeSane.Web.Services.PortalAddonBootstrapService PortalActivation
+@inject LicensingAccess Access
+@inject AuthenticationStateProvider Authentication
+@inject LinuxMadeSane.Core.Abstractions.ISavedCredentialAccessContext CredentialAccess
+@inject Microsoft.Extensions.Options.IOptionsMonitor<ApplicationUpdateOptions> UpdateOptions
+<div class="licensing-embedded">
+    @if (admin)
+    {
+        <section class="licensing-portal" aria-label="Portal registration">
+            @if(portalRegistered)
+            {
+                <div><h3>Portal registered</h3><p>Registered with @portalOrganization.</p><p class="meta-text">@portalConnectionStatus</p></div>
+                <div class="toolbar-actions">
+                    <UiCommandButton Label="Manage Portal registration" Glyph="UiIconGlyph.Key" OnClick="OpenActivation" Disabled="@busy" />
+                    <UiCommandButton Label="Unregister" OnClick="UnregisterPortal" Disabled="@busy" />
+                </div>
+            }
+            else
+            {
+                <div><h3>Connect this instance to Portal</h3><p>Registration is free and unlimited. Paste a Portal registration code to install the connector; remote services use a separate Portal plan.</p></div>
+                <UiCommandButton Label="Register with Portal" Glyph="UiIconGlyph.Key" OnClick="OpenActivation" Disabled="@(!ready)" />
+            }
+        </section>
+        @if (!string.IsNullOrWhiteSpace(portalActionMessage)) { <p class="callout" role="status">@portalActionMessage</p> }
+        <LicenceTypeSelector OnSaved="Reload" OnPreviewChanged="ChangePreview" />
+        @if (BusinessUse && (IsPreview || state?.Licence is null))
+        {
+            <div class="licensing-edition-note">
+                <span class="licensing-edition-label">Professional / Enterprise</span>
+                <h3>Professional software licensing</h3>
+                <p>Community Edition is for free Community use. Professional or Enterprise use requires a licence after the 30-day evaluation. Professional software licensing is separate from free Portal registration and paid Portal remote services.</p>
+                @if (!IsPreview && state?.Evaluation is { } evaluation)
+                { <p>Evaluation ends @evaluation.EndsAtUtc.ToLocalTime().ToString("d"). Reinstalling or switching user types does not restart it.</p> }
+                <p>Confirm your organisation and what you use LMS for on the website. Licensing, organisation details and server counts are handled there.</p>
+                @if (!string.IsNullOrEmpty(message)) { <p class="callout" role="status" aria-live="polite">@message</p> }
+                <div class="toolbar-actions">
+                    @if (IsCommunityEdition && (IsPreview || state?.Evaluation is null && state?.Licence is null && status?.Status != "community_eligible"))
+                    { <UiCommandButton Label="Start 30-day CE evaluation" HideIcon="true" Disabled="@(IsPreview || busy || !ready)" OnClick="Start" /> }
+                    <UiCommandButton Label="Get a licence" HideIcon="true" Disabled="@IsPreview" Href="@(IsPreview ? null : "https://www.linuxmadesane.com/contact?topic=licence-confirmation")" Target="_blank" Rel="noopener noreferrer" />
+                    <UiCommandButton Label="Licence prices" HideIcon="true" Href="https://www.linuxmadesane.com/pricing" Target="_blank" Rel="noopener noreferrer" />
+                </div>
+            </div>
+        }
+        <div class="licensing-links">
+            <UiCommandButton Label="Read the full licence" Glyph="UiIconGlyph.TextFile" Href="/about?tab=notices" />
+            <UiCommandButton Label="Support agreements" Glyph="UiIconGlyph.Website" Href="https://www.linuxmadesane.com/contact?topic=support" Target="_blank" Rel="noopener noreferrer" />
+        </div>
+        <UiModal IsOpen="@showActivation" Title="Activate this LMS instance" Class="licensing-activation-modal" OnClose="CloseActivation">
+            <ChildContent><PortalActivationPanel OnStatusChanged="ReloadPortalStatus" /></ChildContent>
+        </UiModal>
+    }
+    else
+    { <p>An administrator can confirm the user type. <a href="/about?tab=notices">Read the licence</a>.</p> }
+</div>
+@code {
+    [Parameter] public bool Embedded { get; set; }
+    private LicensingState? state;
+    private LicensingStatus? status;
+    private bool admin, ready, busy, showActivation, portalRegistered;
+    private string? portalOrganization, portalConnectionStatus, portalActionMessage;
+    private async Task UnregisterPortal()
+    {
+        if (busy) return;
+        busy = true; portalActionMessage = "Unregistering this Portal connection…";
+        try
+        {
+            await PortalActivation.UnregisterAsync(beforeRestart: () => JS.InvokeVoidAsync("lmsRestart.begin").AsTask());
+            await ReloadPortalStatus();
+            portalActionMessage = "Portal registration removed. Your settings and data are unchanged.";
+        }
+        catch (Exception e) when (e is InvalidOperationException or HttpRequestException or IOException or JSException)
+        { portalActionMessage = e.Message; try { await JS.InvokeVoidAsync("lmsRestart.cancel"); } catch (JSDisconnectedException) { } }
+        finally { busy = false; }
+    }
+    private string category = "", message = "";
+    private string? previewCategory;
+    private bool IsPreview => previewCategory is not null;
+    private bool BusinessUse => (previewCategory ?? category) is "internal_business" or "commercial_services";
+    private bool IsCommunityEdition => new[] { "ce", "community" }.Contains(UpdateOptions.CurrentValue.Edition, StringComparer.OrdinalIgnoreCase);
+    protected override void OnAfterRender(bool firstRender) { if (firstRender) { ready = true; StateHasChanged(); } }
+    protected override async Task OnInitializedAsync()
+    {
+        if (!Embedded) { Navigation.NavigateTo("/about?tab=licensing", replace: true); return; }
+        var user = (await Authentication.GetAuthenticationStateAsync()).User;
+        var id = await CredentialAccess.GetAuthenticatedUserIdAsync();
+        admin = id is not null && Access.CanAdminister(user, id == Guid.Empty);
+        await Reload();
+    }
+    private async Task Reload()
+    {
+        if (!admin) return;
+        status = await Service.StatusAsync();
+        (state, _) = await Service.ReadAsync();
+        category = state.Declarations.LastOrDefault()?.Category ?? "";
+        await ReloadPortalStatus();
+    }
+    private async Task ReloadPortalStatus()
+    {
+        var registration=await PortalActivation.StatusAsync();
+        portalRegistered=registration?.IsEnabled==true && registration.PortalInstanceId.HasValue;
+        portalOrganization=registration?.PortalOrganizationName;
+        portalConnectionStatus=registration?.LastConnectionStatus;
+    }
+    private void OpenActivation() { if(admin && ready)showActivation=true; }
+    private void CloseActivation() => showActivation=false;
+    private void ChangePreview(string? value) { previewCategory = value; message = ""; }
+    private async Task Start()
+    {
+        if (!admin || busy || !ready || IsPreview || !IsCommunityEdition) return;
+        busy = true; message = "Starting evaluation…";
+        try
+        {
+            var user = (await Authentication.GetAuthenticationStateAsync()).User;
+            var id = await CredentialAccess.GetAuthenticatedUserIdAsync();
+            if (id is null || !Access.CanAdminister(user, id == Guid.Empty)) throw new UnauthorizedAccessException();
+            await Service.StartAsync(LicensingAccess.Actor(user, id == Guid.Empty));
+            await Reload(); message = "Evaluation started. Your original evaluation dates are retained.";
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        { message = "The evaluation could not be started. Confirm your user type and try again."; }
+        finally { busy = false; }
+    }
+}

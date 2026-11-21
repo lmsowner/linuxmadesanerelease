@@ -1,0 +1,27 @@
+// Copyright (c) 2026 LMS Developer. All rights reserved.
+// Applicable licence and release scope: see LICENSE.md for details.
+
+using LinuxMadeSane.Core.Models.Caddy;
+
+namespace LinuxMadeSane.Core.Abstractions;
+
+public interface ICaddyIntegrationDataService
+{
+    Task<CaddyIntegrationSnapshot> GetSnapshotAsync(CancellationToken cancellationToken = default);
+
+    Task<IReadOnlyList<CaddyProxyRouteDefinition>> ListRoutesAsync(CancellationToken cancellationToken = default);
+
+    Task<CaddyProxyRouteDefinition?> GetRouteAsync(Guid id, CancellationToken cancellationToken = default);
+
+    Task SaveRouteAsync(CaddyProxyRouteDefinition route, CancellationToken cancellationToken = default);
+
+    Task DeleteRouteAsync(Guid id, CancellationToken cancellationToken = default);
+
+    Task<CaddyOperationResult> CheckRouteAsync(Guid id, CancellationToken cancellationToken = default);
+
+    Task<CaddyOperationResult> InstallAsync(CancellationToken cancellationToken = default);
+
+    Task<CaddyOperationResult> ReloadAsync(CancellationToken cancellationToken = default);
+
+    Task<CaddyOperationResult> RestartAsync(CancellationToken cancellationToken = default);
+}

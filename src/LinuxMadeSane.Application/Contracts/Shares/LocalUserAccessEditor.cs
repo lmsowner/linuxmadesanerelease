@@ -1,0 +1,17 @@
+// Copyright (c) 2026 LMS Developer. All rights reserved.
+// Applicable licence and release scope: see LICENSE.md for details.
+
+using System.ComponentModel.DataAnnotations;
+using LinuxMadeSane.Core.Enums;
+
+namespace LinuxMadeSane.Application.Contracts.Shares;
+
+public sealed class LocalUserAccessEditor
+{
+    [Required]
+    public string UserName { get; set; } = string.Empty;
+
+    public RemoteAccessSshAuthenticationMode SshAuthenticationMode { get; set; } = RemoteAccessSshAuthenticationMode.Password;
+
+    public string AuthorizedKeyEntries { get; set; } = string.Empty;
+}

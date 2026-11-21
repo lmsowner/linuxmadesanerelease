@@ -1,0 +1,25 @@
+// Copyright (c) 2026 LMS Developer. All rights reserved.
+// Applicable licence and release scope: see LICENSE.md for details.
+
+using LinuxMadeSane.Core.Models.DesktopSession;
+
+namespace LinuxMadeSane.Core.Models.RdpOptimizer;
+
+public sealed record DesktopInspectionReport(
+    string DistributionName,
+    string UbuntuVersion,
+    string KernelVersion,
+    string? DisplayManager,
+    IReadOnlyList<string> InstalledDesktopEnvironments,
+    bool IsUbuntu,
+    bool XrdpInstalled,
+    bool XfceInstalled,
+    bool GnomeInstalled,
+    bool XrdpServiceEnabled,
+    bool XrdpServiceActive,
+    DesktopSessionConfiguration SessionConfiguration,
+    DesktopSessionBrokerSnapshot DesktopSessionBroker,
+    IReadOnlyList<PackageState> Packages,
+    IReadOnlyList<ServiceState> Services,
+    OptimizationGainEstimate LikelyGains,
+    IReadOnlyList<string> LikelyIssues);

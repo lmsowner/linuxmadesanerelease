@@ -1,0 +1,152 @@
+// Copyright (c) 2026 LMS Developer. All rights reserved.
+// Applicable licence and release scope: see LICENSE.md for details.
+
+using LinuxMadeSane.Core.Abstractions;
+using LinuxMadeSane.Application.Contracts;
+using LinuxMadeSane.Core.Enums;
+using LinuxMadeSane.Core.Models.Ai;
+using LinuxMadeSane.Core.Models;
+using LinuxMadeSane.Infrastructure.Persistence;
+using LinuxMadeSane.Infrastructure.Persistence.Entities;
+using Microsoft.EntityFrameworkCore;
+
+namespace LinuxMadeSane.Infrastructure.Stores;
+
+public sealed class SqliteManagedHostStore(LinuxMadeSaneDbContext dbContext) : IManagedHostStore
+{
+    public async Task<IReadOnlyList<ManagedHost>> ListAsync(CancellationToken cancellationToken = default)
+    {
+        var items = await dbContext.ManagedHosts
+            .AsNoTracking()
+            .ToListAsync(cancellationToken);
+
+        return items
+            .Select(Map)
+            .OrderBy(ManagedHostCapabilities.GetSortRank)
+            .ThenBy(host => host.Name, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+    }
+
+    public async Task<ManagedHost?> GetAsync(Guid id, CancellationToken cancellationToken = default)
+    {
+        var entity = await dbContext.ManagedHosts
+            .AsNoTracking()
+            .SingleOrDefaultAsync(host => host.Id == id, cancellationToken);
+
+        if (entity is not null) return Map(entity);
+
+        // Saved SFTP vault entries are file-access endpoints, not SSH inventory hosts.
+        // Resolve them by the same stable ID for detached browsers and queued transfers.
+        var credential = await dbContext.SavedConnectionCredentials.AsNoTracking()
+            .SingleOrDefaultAsync(item => item.Id == id && item.Kind == ConnectionCredentialKind.Sftp, cancellationToken);
+        return credential is null ? null : new ManagedHost(
+            credential.Id, credential.Name, credential.Server, credential.Port, "", "Saved SFTP host", "/",
+            HostOperatingStatus.Unknown, credential.PrivateKeyReference is null ? AuthenticationType.Password : AuthenticationType.PrivateKey, null, credential.Username,
+            credential.PasswordReference, credential.PrivateKeyReference, credential.PassphraseReference,
+            false, null, ConnectionTestStatus.NotRun, "", ManagedHostKind.SftpHost);
+    }
+
+    public async Task SaveAsync(ManagedHost host, CancellationToken cancellationToken = default)
+    {
+        var entity = await dbContext.ManagedHosts
+            .SingleOrDefaultAsync(existing => existing.Id == host.Id, cancellationToken);
+
+        if (entity is null)
+        {
+            dbContext.ManagedHosts.Add(Map(host));
+        }
+        else
+        {
+            entity.Name = host.Name;
+            entity.Hostname = host.Hostname;
+            entity.Port = host.Port;
+            entity.Environment = host.Environment;
+            entity.Description = host.Description;
+            entity.DefaultWorkingDirectory = host.DefaultWorkingDirectory;
+            entity.OperatingStatus = (int)host.OperatingStatus;
+            entity.PrimaryAuthenticationType = (int)host.PrimaryAuthenticationType;
+            entity.FallbackAuthenticationType = host.FallbackAuthenticationType.HasValue
+                ? (int)host.FallbackAuthenticationType.Value
+                : null;
+            entity.Username = host.Username;
+            entity.PasswordSecretReference = host.PasswordSecretReference;
+            entity.PrivateKeySecretReference = host.PrivateKeySecretReference;
+            entity.PrivateKeyPassphraseSecretReference = host.PrivateKeyPassphraseSecretReference;
+            entity.UseKeyboardInteractiveFallback = host.UseKeyboardInteractiveFallback;
+            entity.LastSeenUtc = host.LastSeenUtc;
+            entity.LastConnectionTestStatus = (int)host.LastConnectionTestStatus;
+            entity.Platform = host.Platform;
+            entity.Kind = (int)host.Kind;
+        }
+
+        await dbContext.SaveChangesAsync(cancellationToken);
+    }
+
+    public async Task DeleteAsync(Guid id, CancellationToken cancellationToken = default)
+    {
+        var entity = await dbContext.ManagedHosts
+            .SingleOrDefaultAsync(host => host.Id == id, cancellationToken);
+        if (entity is null)
+        {
+            return;
+        }
+
+        await dbContext.AiAttachedServers
+            .Where(server => server.ManagedHostId == id)
+            .ExecuteDeleteAsync(cancellationToken);
+        await dbContext.FileBrowserShortcuts
+            .Where(shortcut => shortcut.ManagedHostId == id)
+            .ExecuteDeleteAsync(cancellationToken);
+
+        dbContext.ManagedHosts.Remove(entity);
+        await dbContext.SaveChangesAsync(cancellationToken);
+    }
+
+    private static ManagedHost Map(ManagedHostEntity entity) =>
+        new(
+            entity.Id,
+            entity.Name,
+            entity.Hostname,
+            entity.Port,
+            entity.Environment,
+            entity.Description,
+            entity.DefaultWorkingDirectory,
+            (HostOperatingStatus)entity.OperatingStatus,
+            (AuthenticationType)entity.PrimaryAuthenticationType,
+            entity.FallbackAuthenticationType.HasValue ? (AuthenticationType)entity.FallbackAuthenticationType.Value : null,
+            entity.Username,
+            entity.PasswordSecretReference,
+            entity.PrivateKeySecretReference,
+            entity.PrivateKeyPassphraseSecretReference,
+            entity.UseKeyboardInteractiveFallback,
+            entity.LastSeenUtc,
+            (ConnectionTestStatus)entity.LastConnectionTestStatus,
+            entity.Platform,
+            (ManagedHostKind)entity.Kind);
+
+    private static ManagedHostEntity Map(ManagedHost host) =>
+        new()
+        {
+            Id = host.Id,
+            Name = host.Name,
+            Hostname = host.Hostname,
+            Port = host.Port,
+            Environment = host.Environment,
+            Description = host.Description,
+            DefaultWorkingDirectory = host.DefaultWorkingDirectory,
+            OperatingStatus = (int)host.OperatingStatus,
+            PrimaryAuthenticationType = (int)host.PrimaryAuthenticationType,
+            FallbackAuthenticationType = host.FallbackAuthenticationType.HasValue
+                ? (int)host.FallbackAuthenticationType.Value
+                : null,
+            Username = host.Username,
+            PasswordSecretReference = host.PasswordSecretReference,
+            PrivateKeySecretReference = host.PrivateKeySecretReference,
+            PrivateKeyPassphraseSecretReference = host.PrivateKeyPassphraseSecretReference,
+            UseKeyboardInteractiveFallback = host.UseKeyboardInteractiveFallback,
+            LastSeenUtc = host.LastSeenUtc,
+            LastConnectionTestStatus = (int)host.LastConnectionTestStatus,
+            Platform = host.Platform,
+            Kind = (int)host.Kind
+        };
+}

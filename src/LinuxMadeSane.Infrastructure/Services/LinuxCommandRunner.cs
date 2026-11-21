@@ -1,0 +1,314 @@
+// Copyright (c) 2026 LMS Developer. All rights reserved.
+// Applicable licence and release scope: see LICENSE.md for details.
+
+using System.ComponentModel;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
+using System.Text;
+using LinuxMadeSane.Core.Abstractions;
+using LinuxMadeSane.Core.Models.RdpOptimizer;
+using Microsoft.Extensions.Logging;
+
+namespace LinuxMadeSane.Infrastructure.Services;
+
+public sealed class LinuxCommandRunner(ILogger<LinuxCommandRunner> logger) : ILinuxCommandRunner, IStreamingLinuxCommandRunner
+{
+    public async Task<LinuxCommandResult> RunAsync(
+        LinuxCommandRequest request,
+        bool dryRun,
+        CancellationToken cancellationToken = default)
+        => await RunCoreAsync(request, dryRun, null, cancellationToken);
+
+    public async Task<LinuxCommandResult> RunStreamingAsync(
+        LinuxCommandRequest request,
+        bool dryRun,
+        Action<LinuxCommandOutput> onOutput,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(onOutput);
+        return await RunCoreAsync(request, dryRun, onOutput, cancellationToken);
+    }
+
+    private async Task<LinuxCommandResult> RunCoreAsync(
+        LinuxCommandRequest request,
+        bool dryRun,
+        Action<LinuxCommandOutput>? onOutput,
+        CancellationToken cancellationToken)
+    {
+        var commandText = RenderCommand(request);
+        var operationLabel = ResolveOperationLabel(request, commandText);
+        var startedAt = DateTimeOffset.UtcNow;
+        ProcessStartInfo? startInfo = null;
+        Process? process = null;
+
+        LogCommandRequested(request, operationLabel, commandText);
+
+        if (dryRun)
+        {
+            return new LinuxCommandResult(
+                commandText,
+                0,
+                string.Empty,
+                string.Empty,
+                startedAt,
+                DateTimeOffset.UtcNow,
+                true);
+        }
+
+        using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        if (request.Timeout > TimeSpan.Zero)
+        {
+            timeoutCts.CancelAfter(request.Timeout);
+        }
+
+        try
+        {
+            startInfo = BuildStartInfo(request);
+            process = new Process { StartInfo = startInfo };
+            process.Start();
+
+            var inputTask = WriteStandardInputAsync(process, request.StandardInputBytes, timeoutCts.Token);
+            var stdoutTask = ReadOutputAsync(process.StandardOutput, false, onOutput, timeoutCts.Token);
+            var stderrTask = ReadOutputAsync(process.StandardError, true, onOutput, timeoutCts.Token);
+
+            await process.WaitForExitAsync(timeoutCts.Token);
+
+            await Task.WhenAll(inputTask, stdoutTask, stderrTask);
+            var stdout = stdoutTask.Result;
+            var stderr = stderrTask.Result;
+
+            LogCommandCompleted(request, operationLabel, commandText, process.ExitCode);
+
+            return new LinuxCommandResult(
+                commandText,
+                process.ExitCode,
+                stdout,
+                stderr,
+                startedAt,
+                DateTimeOffset.UtcNow,
+                false);
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            TryKillProcessTree(process);
+            logger.LogWarning("Linux command timed out: {Operation}", operationLabel);
+
+            return new LinuxCommandResult(
+                commandText,
+                124,
+                string.Empty,
+                $"Command timed out after {request.Timeout}.",
+                startedAt,
+                DateTimeOffset.UtcNow,
+                false);
+        }
+        catch (OperationCanceledException)
+        {
+            TryKillProcessTree(process);
+            logger.LogWarning("Linux command cancelled: {Operation}", operationLabel);
+            throw;
+        }
+        catch (Win32Exception exception) when (IsExecutableMissing(exception))
+        {
+            var executableName = startInfo?.FileName ?? request.FileName;
+            var message = $"Command '{executableName}' was not found on this LMS host.";
+
+            LogMissingExecutable(request, operationLabel, commandText, message);
+
+            return new LinuxCommandResult(
+                commandText,
+                127,
+                string.Empty,
+                message,
+                startedAt,
+                DateTimeOffset.UtcNow,
+                false);
+        }
+        catch (Exception exception)
+        {
+            TryKillProcessTree(process);
+            logger.LogError(exception, "Linux command failed before completion: {Operation}", operationLabel);
+
+            return new LinuxCommandResult(
+                commandText,
+                -1,
+                string.Empty,
+                exception.Message,
+                startedAt,
+                DateTimeOffset.UtcNow,
+                false);
+        }
+        finally
+        {
+            process?.Dispose();
+        }
+    }
+
+    private static async Task<string> ReadOutputAsync(
+        StreamReader reader,
+        bool isError,
+        Action<LinuxCommandOutput>? onOutput,
+        CancellationToken cancellationToken)
+    {
+        var output = new StringBuilder();
+        while (await reader.ReadLineAsync(cancellationToken) is { } line)
+        {
+            output.AppendLine(line);
+            onOutput?.Invoke(new LinuxCommandOutput(line, isError, DateTimeOffset.UtcNow));
+        }
+
+        return output.ToString();
+    }
+
+    private static void TryKillProcessTree(Process? process)
+    {
+        try
+        {
+            if (process is not null && !process.HasExited)
+            {
+                process.Kill(entireProcessTree: true);
+            }
+        }
+        catch (InvalidOperationException)
+        {
+            // The process was never started or exited between checks.
+        }
+        catch (Win32Exception)
+        {
+            // Best effort only: preserve the original timeout or cancellation result.
+        }
+    }
+
+    private static bool IsExecutableMissing(Win32Exception exception) =>
+        exception.NativeErrorCode == 2 ||
+        exception.Message.Contains("No such file", StringComparison.OrdinalIgnoreCase);
+
+    private void LogCommandRequested(LinuxCommandRequest request, string operationLabel, string commandText)
+    {
+        logger.LogDebug("Linux command requested: {Operation}", operationLabel);
+    }
+
+    private void LogCommandCompleted(LinuxCommandRequest request, string operationLabel, string commandText, int exitCode)
+    {
+        logger.LogDebug("Linux command completed: {Operation} => {ExitCode}", operationLabel, exitCode);
+    }
+
+    private void LogMissingExecutable(LinuxCommandRequest request, string operationLabel, string commandText, string message)
+    {
+        if (request.IsOptionalExternalTool)
+        {
+            logger.LogDebug(
+                "Linux command executable was not found: {Operation}. {FailureMessage}",
+                operationLabel,
+                message);
+            return;
+        }
+
+        logger.LogWarning(
+            "Linux command executable was not found: {Operation}. {FailureMessage}",
+            operationLabel,
+            message);
+    }
+
+    private static string ResolveOperationLabel(LinuxCommandRequest request, string commandText) =>
+        string.IsNullOrWhiteSpace(request.Description)
+            ? commandText
+            : request.Description.Trim();
+
+    private static ProcessStartInfo BuildStartInfo(LinuxCommandRequest request)
+    {
+        var requiresSudo = request.RequiresSudo && !IsCurrentProcessRoot();
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = requiresSudo ? "sudo" : request.FileName,
+            RedirectStandardInput = request.StandardInputBytes is not null,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false
+        };
+
+        if (!string.IsNullOrWhiteSpace(request.WorkingDirectory))
+        {
+            startInfo.WorkingDirectory = request.WorkingDirectory;
+        }
+
+        if (requiresSudo)
+        {
+            startInfo.ArgumentList.Add("-n");
+            startInfo.ArgumentList.Add(request.FileName);
+        }
+
+        for (var index = 0; index < request.Arguments.Count; index++)
+        {
+            startInfo.ArgumentList.Add(request.Arguments[index]);
+        }
+
+        return startInfo;
+    }
+
+    private static async Task WriteStandardInputAsync(
+        Process process,
+        byte[]? inputBytes,
+        CancellationToken cancellationToken)
+    {
+        if (inputBytes is null)
+        {
+            return;
+        }
+
+        try
+        {
+            await process.StandardInput.BaseStream.WriteAsync(inputBytes, cancellationToken);
+            await process.StandardInput.BaseStream.FlushAsync(cancellationToken);
+        }
+        finally
+        {
+            process.StandardInput.Close();
+        }
+    }
+
+    private static string RenderCommand(LinuxCommandRequest request)
+    {
+        var builder = new StringBuilder();
+        if (request.RequiresSudo && !IsCurrentProcessRoot())
+        {
+            builder.Append("sudo -n ");
+        }
+
+        builder.Append(request.FileName);
+        for (var index = 0; index < request.Arguments.Count; index++)
+        {
+            builder.Append(' ');
+            builder.Append(request.SensitiveArgumentIndexes?.Contains(index) == true
+                ? "'<redacted>'"
+                : Quote(request.Arguments[index]));
+        }
+
+        return builder.ToString();
+    }
+
+    internal static bool IsCurrentProcessRoot()
+    {
+        if (OperatingSystem.IsLinux() || OperatingSystem.IsMacOS())
+        {
+            return GetEffectiveUserId() == 0;
+        }
+
+        return string.Equals(Environment.UserName, "root", StringComparison.OrdinalIgnoreCase);
+    }
+
+    [DllImport("libc", EntryPoint = "geteuid")]
+    private static extern uint GetEffectiveUserId();
+
+    private static string Quote(string value)
+    {
+        if (value.Length == 0)
+        {
+            return "''";
+        }
+
+        return value.Any(char.IsWhiteSpace) || value.Contains('"') || value.Contains('\'')
+            ? $"'{value.Replace("'", "'\"'\"'")}'"
+            : value;
+    }
+}

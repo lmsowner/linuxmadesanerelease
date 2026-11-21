@@ -1,0 +1,143 @@
+# Install Details
+
+## One-Line Install
+
+```bash
+curl -fsSL https://www.linuxmadesane.com/install.sh | sudo bash
+```
+
+Short link:
+
+```bash
+curl -fsSL https://bit.ly/4tCQKCN | sudo bash
+```
+
+The public installer:
+
+- detects `linux-x64`, `linux-arm64`, or `linux-arm`
+- downloads the current matching CE tarball from `https://www.linuxmadesane.com`
+- verifies `SHA256SUMS` when available
+- installs to `/opt/linuxmadesane/ce`
+- stores data in `/var/lib/linuxmadesane/ce`
+- writes config to `/etc/linuxmadesane/ce/service.env`
+- creates the `linux-made-sane.service` systemd unit
+- creates a dedicated `linuxmadesane` service account for the LMS web service
+- installs and starts Caddy for local reverse proxy and Edge Gateway workflows unless system package installation is disabled
+- configures localhost SSH runner access for terminal, runbook, and scheduled automation workflows unless disabled
+- creates `/var/lib/linuxmadesane/runner/workspace` as the default writable local runner workspace
+- stores Desktop Helper as a compressed optional payload on fresh installs and expands it only when selected
+- lets the operator enable Desktop Helper from **Desktop Assistant > Setup** on graphical Linux hosts
+- stops any existing `linux-made-sane.service` before replacing application files during an update
+- installs `linux-made-sane-update` for LMS-managed self-updates
+- starts the service and checks `/healthz`
+- writes a short-lived local lost-access recovery challenge and prints the matching URL/code at the end
+
+See [Security model](SECURITY.md) before changing runner, SSH, or sudo defaults.
+
+## Install Options
+
+```bash
+curl -fsSL https://www.linuxmadesane.com/install.sh | sudo bash -s -- --port 5095
+curl -fsSL https://www.linuxmadesane.com/install.sh | sudo env RID=linux-arm64 bash
+```
+
+Supported environment variables:
+
+- `RID`: `linux-x64`, `linux-arm64`, or `linux-arm`
+- `LMS_SERVICE_PORT`: HTTP port, default `5080`
+- `LMS_INSTALL_ROOT`: default `/opt/linuxmadesane/ce`
+- `LMS_DATA_ROOT`: default `/var/lib/linuxmadesane/ce`
+- `LMS_CONFIG_ROOT`: default `/etc/linuxmadesane/ce`
+- `LMS_SERVICE_UNIT`: default `linux-made-sane.service`
+- `LMS_INSTALL_SYSTEM_PACKAGES`: set `false` to skip apt package installation
+- `LMS_CONFIGURE_LOCAL_SSH`: set `false` to skip localhost SSH runner setup
+- `LMS_ENABLE_LOCAL_SUDO`: set `false` to skip passwordless sudo setup for local automation
+- `LMS_INSTALL_DESKTOP_HELPER`: `auto` by default; installs and updates resolve to `false` unless an explicit saved choice enables it
+- `LMS_DESKTOP_HELPER_LOCAL_LMS_URL`: override the local tray URL, default `http://127.0.0.1:<port>/desktop-assistant`
+- `LMS_RECOVERY_TTL_MINUTES`: local lost-access recovery lifetime, default `30`, clamped to `5`-`240`
+- `LMS_BASE_URL`: override the public website base URL for staging tests
+- `LMS_UPDATE_HELPER_PATH`: default `/usr/local/sbin/linux-made-sane-update`
+
+Supported flags:
+
+```bash
+curl -fsSL https://www.linuxmadesane.com/install.sh | sudo bash -s -- --port 5095
+curl -fsSL https://www.linuxmadesane.com/install.sh | sudo bash -s -- --no-system-packages
+curl -fsSL https://www.linuxmadesane.com/install.sh | sudo bash -s -- --no-local-ssh
+curl -fsSL https://www.linuxmadesane.com/install.sh | sudo bash -s -- --no-local-sudo
+curl -fsSL https://www.linuxmadesane.com/install.sh | sudo bash -s -- --desktop-helper
+curl -fsSL https://www.linuxmadesane.com/install.sh | sudo bash -s -- --no-desktop-helper
+curl -fsSL https://www.linuxmadesane.com/install.sh | sudo bash -s -- --recovery-ttl 60
+curl -fsSL https://www.linuxmadesane.com/install.sh | sudo bash -s -- --no-start
+curl -fsSL https://www.linuxmadesane.com/install.sh | sudo bash -s -- --uninstall
+curl -fsSL https://www.linuxmadesane.com/install.sh | sudo bash -s -- --purge
+```
+
+Desktop Helper is optional and does not install GNOME Shell or a display manager. On a host that already has a graphical desktop, **Desktop Assistant > Setup** can switch graphical startup off after confirmation. That selects `multi-user.target` and stops the active display manager while leaving LMS and SSH running.
+
+## Lost Access Recovery
+
+If you cannot complete LMS web sign-in but still have SSH access to the machine with a sudo-capable Linux account, rerun the installer:
+
+```bash
+curl -fsSL https://www.linuxmadesane.com/install.sh | sudo bash
+```
+
+The installer repairs or updates the service, then prints a short-lived recovery URL and recovery code. If your browser is on another workstation, forward the LMS port over SSH:
+
+```bash
+ssh -L 5080:127.0.0.1:5080 <sudo-user>@<server>
+```
+
+Open the printed `http://127.0.0.1:5080/login?recovery=...` URL through that tunnel, enter the LMS account email and recovery code, then fix the MFA, passkey, email sign-in, or trusted-network setting that locked you out. If the URL expires or too many attempts fail, rerun the installer to mint a new code.
+
+## Service Commands
+
+```bash
+sudo systemctl status linux-made-sane.service
+sudo systemctl status caddy.service
+sudo systemctl start linux-made-sane.service
+sudo systemctl stop linux-made-sane.service
+sudo systemctl restart linux-made-sane.service
+sudo journalctl -u linux-made-sane.service -n 100 --no-pager
+sudo /usr/local/sbin/linux-made-sane-update
+```
+
+## Desktop Assistant Helper
+
+Fresh installs leave Desktop Helper disabled so headless hosts do not start desktop processes, install optional tray packages, or retain the expanded self-contained desktop runtime. A compressed payload remains available for offline opt-in. Enable it from **Desktop Assistant > Setup**, or opt in during installation:
+
+```bash
+curl -fsSL https://www.linuxmadesane.com/install.sh | sudo bash -s -- --desktop-helper
+```
+
+When enabled, LMS sets up:
+
+```text
+/etc/systemd/user/linux-made-sane-desktop-helper.service
+/etc/xdg/autostart/linux-made-sane-desktop-helper.desktop
+```
+
+The host setting is stored separately from versioned releases, so updates preserve it. Existing installations that predate the setting are detected as enabled on their first update. Enabling the helper does not reinstall or restart the core LMS service.
+
+LMS enables the user service globally and tries to start it for active GUI users. To restart it manually from a terminal inside the GUI session:
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now linux-made-sane-desktop-helper.service
+systemctl --user status linux-made-sane-desktop-helper.service
+```
+
+## Cold Start
+
+The app creates its SQLite database on first startup. A healthy first start should create:
+
+```text
+/var/lib/linuxmadesane/ce/linuxmadesane.db
+```
+
+The health endpoint should return HTTP 200:
+
+```bash
+curl -fsS http://127.0.0.1:5080/healthz
+```

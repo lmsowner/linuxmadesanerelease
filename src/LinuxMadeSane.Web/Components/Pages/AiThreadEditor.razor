@@ -1,0 +1,2133 @@
+@* Copyright (c) 2026 LMS Developer. All rights reserved.
+   Applicable licence and release scope: see LICENSE.md for details. *@
+
+@page "/ai/threads"
+@page "/ai/threads/new"
+@page "/ai/threads/{ThreadId:guid}"
+@rendermode InteractiveServer
+@implements IAsyncDisposable
+@using LinuxMadeSane.Application.Interfaces
+@using LinuxMadeSane.Application.Services
+@using LinuxMadeSane.Core.Models.Ai
+@using Microsoft.JSInterop
+@using System.Text.Json
+@inject IAiApprovalService ApprovalService
+@inject IAiThreadService ThreadService
+@inject IAiChatService ChatService
+@inject IHomeLabService HomeLabService
+@inject IJSRuntime JSRuntime
+@inject NavigationManager NavigationManager
+
+@if(!Embedded) { <PageTitle>@(IsHomeLabRoute ? "Home Lab Help" : "AI Chat Workspace") | Linux Made Sane</PageTitle> }
+
+<div class="@(Embedded ? "ai-embedded-discussion" : "page-shell ai-chat-shell "+(IsHomeLabRoute ? "home-lab-ai-shell" : string.Empty))">
+    @if (IsInitialLoadPending)
+    {
+        <section class="surface-card">
+            <p class="meta-text">Loading AI workspace...</p>
+        </section>
+    }
+    else if (!string.IsNullOrWhiteSpace(loadError) && threads.Count == 0)
+    {
+        <section class="surface-card">
+            <div class="callout error">@loadError</div>
+        </section>
+    }
+    else
+    {
+        @if (IsHomeLabRoute || Embedded)
+        {
+            @if (ThreadId.HasValue && IsThreadWorkspaceLoading(ThreadId.Value))
+            {
+                <p class="meta-text">Loading conversation...</p>
+            }
+            else if (HasActiveWorkspace)
+            {
+                @ActiveThreadWorkspaceContent
+            }
+            else if (!string.IsNullOrWhiteSpace(loadError))
+            {
+                <div class="callout error">@loadError</div>
+            }
+            else
+            {
+                <div class="empty-state">Conversation not found.</div>
+            }
+        }
+        else
+        {
+        <section class="workspace-tabs-shell">
+            <div class="workspace-tab-toolbar">
+                <div class="table-header workspace-tab-toolbar-header">
+                    <h1 class="page-title-compact">@(IsHomeLabRoute ? "Home Lab help" : "AI chats")</h1>
+                    <span>@FilteredThreads.Count item(s)</span>
+                </div>
+
+                <div class="workspace-tab-controls">
+                    <label class="workspace-search-label">
+                        <span>Search</span>
+                        <InputText @bind-Value="threadSearch" placeholder="Search title, provider, or model" />
+                    </label>
+
+                    <div class="segmented-control">
+                        <button class="segmented-button @(activeThreadFilter == ThreadSidebarFilter.All ? "selected" : string.Empty)"
+                                type="button"
+                                @onclick="(() => SetThreadFilter(ThreadSidebarFilter.All))">
+                            All
+                        </button>
+                        <button class="segmented-button @(activeThreadFilter == ThreadSidebarFilter.PendingApproval ? "selected" : string.Empty)"
+                                type="button"
+                                @onclick="(() => SetThreadFilter(ThreadSidebarFilter.PendingApproval))">
+                            Needs your OK
+                        </button>
+                        <button class="segmented-button @(activeThreadFilter == ThreadSidebarFilter.NoServers ? "selected" : string.Empty)"
+                                type="button"
+                                @onclick="(() => SetThreadFilter(ThreadSidebarFilter.NoServers))">
+                            This LMS server
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            @if (!string.IsNullOrWhiteSpace(loadError) && threads.Count > 0)
+            {
+                <div class="callout error">@loadError</div>
+            }
+
+            @if (threads.Count == 0)
+            {
+                <div class="workspace-empty-panel">
+                    <div class="empty-state stack-tight">
+                        <span>Create a chat to start.</span>
+                        <div>
+                            <UiCommandButton Label="@(isCreatingThread ? "Creating..." : "New chat")"
+                                             Glyph="UiIconGlyph.Plus"
+                                             Variant="UiButtonVariant.Toolbar"
+                                             OnClick="CreateThreadAndNavigateAsync"
+                                             Disabled="@isCreatingThread" />
+                        </div>
+                    </div>
+                </div>
+            }
+            else if (FilteredThreads.Count == 0)
+            {
+                <div class="workspace-empty-panel">
+                    <div class="empty-state">
+                        No threads match the current search or filter.
+                    </div>
+                </div>
+            }
+            else
+            {
+                <TabControl ActiveValue="@SelectedThreadTabValue"
+                            ActiveValueChanged="HandleThreadTabChangedAsync"
+                            PanelClass="workspace-thread-tab-panel"
+                            Class="workspace-thread-tab-control">
+                    <ChildContent>
+                        @foreach (var thread in FilteredThreads)
+                        {
+                            <TabPage @key="thread.Id"
+                                     Value="@thread.Id.ToString()"
+                                     Title="@thread.Title"
+                                     Tooltip="@BuildThreadTabTooltip(thread)">
+                                <Header>
+                                    <div class="thread-tab-chip" title="@BuildThreadTabTooltip(thread)">
+                                        <span class="thread-tab-title">@thread.Title</span>
+
+                                        @if (thread.PendingApprovalCount > 0)
+                                        {
+                                            <span class="thread-tab-badge warning">@thread.PendingApprovalCount</span>
+                                        }
+
+                                        @if (thread.AttachedServerCount == 0)
+                                        {
+                                            <span class="thread-tab-badge neutral">This LMS server</span>
+                                        }
+                                    </div>
+                                </Header>
+                                <ChildContent>
+                                    @if (ThreadId != thread.Id)
+                                    {
+                                        <div class="workspace-empty-panel">
+                                            <div class="empty-state">
+                                                Select a chat to load its history.
+                                            </div>
+                                        </div>
+                                    }
+                                    else if (IsThreadWorkspaceLoading(thread.Id))
+                                    {
+                                        <div class="workspace-empty-panel">
+                                            <p class="meta-text">Loading chat history...</p>
+                                        </div>
+                                    }
+                                    else if (IsThreadWorkspaceReady(thread.Id))
+                                    {
+                                        @ActiveThreadWorkspaceContent
+                                    }
+                                    else if (!string.IsNullOrWhiteSpace(loadError))
+                                    {
+                                        <div class="callout error">@loadError</div>
+                                    }
+                                    else
+                                    {
+                                        <div class="workspace-empty-panel">
+                                            <div class="empty-state">
+                                                Chat not found.
+                                            </div>
+                                        </div>
+                                    }
+                                </ChildContent>
+                            </TabPage>
+                        }
+                    </ChildContent>
+                </TabControl>
+            }
+        </section>
+        }
+    }
+</div>
+
+@code {
+    [Parameter]
+    public Guid? ThreadId { get; set; }
+
+    [Parameter] public bool Embedded { get; set; }
+
+    private AiChatThreadEditorContextViewModel? selectedThreadContext;
+    private static readonly JsonSerializerOptions ToolPayloadSerializerOptions = new(JsonSerializerDefaults.Web)
+    {
+        PropertyNameCaseInsensitive = true
+    };
+    private static readonly string[] KnownHomeLabStorageRoles = ["downloads", "movies", "tv", "photos"];
+    private AiChatWorkspaceViewModel? workspace;
+    private AiChatMessageComposer messageComposer = new();
+    private IReadOnlyList<AiChatThreadListItemViewModel> threads = [];
+    private string threadSearch = string.Empty;
+    private ThreadSidebarFilter activeThreadFilter = ThreadSidebarFilter.All;
+    private string workspaceError = string.Empty;
+    private string loadError = string.Empty;
+    private string messageError = string.Empty;
+    private string approvalError = string.Empty;
+    private bool isLoaded;
+    private bool hasLoadedOnce;
+    private bool isCreatingThread;
+    private bool isSavingWorkspace;
+    private bool isApplyingProviderSelection;
+    private bool isSendingMessage;
+    private bool isClearingConversation;
+    private Guid? loadingThreadId;
+    private ElementReference timelineElement;
+    private bool scrollTimelineToEnd;
+    private bool smoothTimelineScroll;
+    private Guid? timelineScrollThreadId;
+    private string lastTimelineScrollKey = string.Empty;
+    private Guid? returnToHomeLabActionId;
+    private Guid? processedStorageSetupInvocationId;
+    private Guid? requiredHomeLabVpnGatewayInvocationId;
+    private Guid? dismissedVpnGatewayChoiceInvocationId;
+    private string? storagePickerRole;
+    private IReadOnlyList<string> requiredHomeLabStorageRoles = [];
+    private IReadOnlyList<HomeLabAiGateway> requiredHomeLabVpnGateways = [];
+    private readonly Dictionary<string, string> selectedHomeLabStoragePaths = new(StringComparer.OrdinalIgnoreCase);
+    private bool isSavingHomeLabStorage;
+    private bool isSelectingHomeLabVpnGateway;
+    private string homeLabStorageError = string.Empty;
+    private readonly HashSet<Guid> submittingApprovalIds = [];
+    private readonly HashSet<Guid> mutatingMessageIds = [];
+    private readonly HashSet<Guid> mutatingToolIds = [];
+
+    private string CurrentRelativePath =>
+        NavigationManager.ToBaseRelativePath(NavigationManager.Uri).Split('?', '#')[0].TrimEnd('/');
+
+    private bool IsHomeLabRoute =>
+        CurrentRelativePath.StartsWith("home-lab/assist", StringComparison.OrdinalIgnoreCase);
+
+    private bool IsNewRoute =>
+        CurrentRelativePath.EndsWith("/new", StringComparison.OrdinalIgnoreCase);
+
+    private string BuildThreadRoute(Guid threadId) =>
+        IsHomeLabRoute ? $"/home-lab/assist/{threadId}" : $"/ai/threads/{threadId}";
+
+    private bool HasActiveWorkspace =>
+        ThreadId.HasValue &&
+        selectedThreadContext is not null &&
+        workspace is not null;
+
+    private bool HasActiveRun =>
+        ActiveRun is not null || returnToHomeLabActionId.HasValue;
+
+    private bool CanSaveHomeLabStorage =>
+        requiredHomeLabStorageRoles.Count > 0 &&
+        requiredHomeLabStorageRoles.All(role => !string.IsNullOrWhiteSpace(GetSelectedStoragePath(role)));
+
+    private string StoragePickerInitialPath =>
+        storagePickerRole is null
+            ? "/mnt/storage"
+            : GetSelectedStoragePath(storagePickerRole) ?? "/mnt/storage";
+
+    private bool HasPersistedConversationState =>
+        workspace is not null &&
+        (workspace.Messages.Count > 0 ||
+         workspace.ToolInvocations.Count > 0 ||
+         workspace.ApprovalRequests.Count > 0 ||
+         workspace.ChatRuns.Count > 0 ||
+         workspace.Checkpoints.Count > 0);
+
+    private bool IsInitialLoadPending =>
+        !hasLoadedOnce &&
+        !isLoaded &&
+        selectedThreadContext is null &&
+        workspace is null &&
+        threads.Count == 0 &&
+        string.IsNullOrWhiteSpace(loadError);
+
+    private IReadOnlyList<AiModelDefinition> CurrentModels =>
+        selectedThreadContext is null || string.IsNullOrWhiteSpace(selectedThreadContext.Editor.ProviderKey)
+            ? []
+            : selectedThreadContext.Models
+                .Where(model => model.ProviderKey.Equals(selectedThreadContext.Editor.ProviderKey, StringComparison.OrdinalIgnoreCase))
+                .OrderBy(model => model.DisplayName, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+
+    private IReadOnlyList<AiConfiguredProviderViewModel> AvailableThreadProviders =>
+        selectedThreadContext is null
+            ? []
+            : selectedThreadContext.ConfiguredProviders
+                .Where(provider =>
+                    (provider.IsEnabled &&
+                     selectedThreadContext.SupportedProviders.FirstOrDefault(definition => definition.ProviderType == provider.ProviderType)?.IsRuntimeImplemented != false) ||
+                    provider.ProviderKey.Equals(selectedThreadContext.Editor.ProviderKey, StringComparison.OrdinalIgnoreCase))
+                .OrderByDescending(provider => provider.IsDefault)
+                .ThenBy(provider => provider.DisplayName, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+
+    private IReadOnlyList<LinuxMadeSane.Core.Models.ManagedHost> ExplicitSelectedServers =>
+        selectedThreadContext is null
+            ? []
+            : selectedThreadContext.AvailableServers
+                .Where(server => selectedThreadContext.Editor.AttachedServerIds.Contains(server.Id))
+                .OrderBy(server => server.Name, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+
+    private IReadOnlyList<AiAttachedServer> EffectiveAttachedServers =>
+        workspace is null
+            ? []
+            : workspace.AttachedServers
+                .OrderBy(server => server.ServerName, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+
+    private AiChatThreadListItemViewModel? SelectedThreadListItem =>
+        ThreadId.HasValue
+            ? threads.FirstOrDefault(thread => thread.Id == ThreadId.Value)
+            : null;
+
+    private IReadOnlyList<AiChatThreadListItemViewModel> FilteredThreads
+    {
+        get
+        {
+            var filtered = threads
+                .Where(MatchesWorkspaceContext)
+                .Where(MatchesSearch)
+                .Where(MatchesFilter)
+                .ToList();
+
+            if (SelectedThreadListItem is not null &&
+                MatchesWorkspaceContext(SelectedThreadListItem) &&
+                filtered.All(thread => thread.Id != SelectedThreadListItem.Id))
+            {
+                filtered.Insert(0, SelectedThreadListItem);
+            }
+
+            return filtered;
+        }
+    }
+
+    private IReadOnlyList<AiApprovalRequest> PendingApprovalRequests =>
+        workspace is null
+            ? []
+            : workspace.ApprovalRequests
+                .Where(request => request.State == AiApprovalState.Pending)
+                .OrderByDescending(request => request.RequestedAtUtc)
+                .Take(5)
+                .ToArray();
+
+    private IReadOnlyList<AiChatToolExecutionTimelineItemViewModel> RecentToolEvents =>
+        workspace is null
+            ? []
+            : workspace.Timeline
+                .OfType<AiChatToolExecutionTimelineItemViewModel>()
+                .OrderByDescending(item => item.StartedAtUtc)
+                .Take(5)
+                .ToArray();
+
+    private bool UsesImplicitLocalMachine =>
+        selectedThreadContext is not null &&
+        selectedThreadContext.Editor.AttachedServerIds.Count == 0;
+
+    private string? SelectedThreadTabValue =>
+        ThreadId?.ToString();
+
+    private bool IsThreadWorkspaceReady(Guid threadId) =>
+        ThreadId.HasValue &&
+        ThreadId.Value == threadId &&
+        selectedThreadContext?.Editor.Id == threadId &&
+        workspace?.Thread.Id == threadId;
+
+    private bool IsThreadWorkspaceLoading(Guid threadId) =>
+        ThreadId.HasValue &&
+        ThreadId.Value == threadId &&
+        (loadingThreadId == threadId || (!isLoaded && !IsThreadWorkspaceReady(threadId)));
+
+    private AiProviderDefinition SelectedProviderDefinition =>
+        selectedThreadContext is null
+            ? new AiProviderDefinition("unknown", AiProviderType.Unknown, "Unknown", "Unknown provider type.", false, false)
+            : selectedThreadContext.SupportedProviders.FirstOrDefault(provider =>
+                    provider.Key.Equals(selectedThreadContext.Editor.ProviderKey, StringComparison.OrdinalIgnoreCase) ||
+                    provider.ProviderType == workspace?.Thread.ProviderType)
+                ?? new AiProviderDefinition("unknown", AiProviderType.Unknown, "Unknown", "Unknown provider type.", false, false);
+
+    private AiChatRun? ActiveRun =>
+        workspace?.ChatRuns
+            .OrderByDescending(run => run.UpdatedAtUtc)
+            .FirstOrDefault(run => !run.IsTerminal);
+
+    private AiChatRun? LatestRun =>
+        workspace?.ChatRuns
+            .OrderByDescending(run => run.UpdatedAtUtc)
+            .FirstOrDefault();
+
+    private AiChatRun? DisplayedRun => ActiveRun ?? LatestRun;
+
+    private AiChatMessage? LatestAssistantMessage => workspace?.Timeline
+        .OfType<AiChatMessageTimelineItemViewModel>()
+        .Select(item => item.Message)
+        .LastOrDefault(message => message.Role == AiChatMessageRole.Assistant);
+
+    private bool IsResponseNeeded =>
+        IsWaitingForChatInput &&
+        LatestAssistantMessage is { } assistantMessage &&
+        LooksLikeResponseRequest(assistantMessage.Content);
+
+    private bool ShouldDisplayRunStatus =>
+        DisplayedRun is not null &&
+        DisplayedRun.Status != AiChatRunStatus.AwaitingApproval &&
+        (ActiveRun is not null || DisplayedRun.Status is AiChatRunStatus.Failed or AiChatRunStatus.Cancelled);
+
+    private bool CanCancelRun =>
+        ActiveRun is not null &&
+        ActiveRun.Status is AiChatRunStatus.Queued or AiChatRunStatus.Running or AiChatRunStatus.CancellationRequested;
+
+    private bool IsWaitingForChatInput =>
+        HasActiveWorkspace &&
+        !HasActiveRun &&
+        !isSendingMessage &&
+        requiredHomeLabVpnGateways.Count == 0 &&
+        requiredHomeLabStorageRoles.Count == 0 &&
+        PendingApprovalRequests.Count == 0;
+
+    private bool IsWaitingForUserInput =>
+        IsWaitingForChatInput ||
+        requiredHomeLabVpnGateways.Count > 0 ||
+        requiredHomeLabStorageRoles.Count > 0 ||
+        PendingApprovalRequests.Count > 0;
+
+    private bool IsAssistantResponseNeeded(AiChatMessage message) =>
+        IsResponseNeeded && LatestAssistantMessage?.Id == message.Id;
+
+    private bool ShouldPollRun =>
+        returnToHomeLabActionId.HasValue ||
+        (ActiveRun is not null &&
+         ActiveRun.Status is AiChatRunStatus.Queued or AiChatRunStatus.Running or AiChatRunStatus.CancellationRequested);
+
+    private string ServerContextSummary =>
+        UsesImplicitLocalMachine
+            ? "This chat works on the server running Linux Made Sane."
+            : $"{EffectiveAttachedServers.Count} linked machine(s).";
+
+    private string MachineScopeLabel =>
+        UsesImplicitLocalMachine
+            ? "This LMS server"
+            : $"{ExplicitSelectedServers.Count} linked";
+
+    private CancellationTokenSource? workspaceRefreshCancellationTokenSource;
+    private Task? workspaceRefreshTask;
+
+    private RenderFragment ActiveThreadWorkspaceContent => @<section class="workspace-thread-shell @(IsHomeLabRoute ? "home-lab-guided-workspace" : string.Empty)">
+            @if (storagePickerRole is not null)
+            {
+                <UiModal IsOpen="true"
+                         Title="@($"Choose the {GetStorageRoleLabel(storagePickerRole)} folder")"
+                         Subtitle="Browse to the host folder LMS should mount into the containers."
+                         Class="home-lab-storage-picker-modal"
+                         Resizable="true"
+                         CloseOnBackdrop="false"
+                         OnClose="CloseStorageFolderPicker">
+                    <ChildContent>
+                        <HostFileBrowserWorkspace @key="storagePickerRole"
+                                                  HostId="@AiLocalMachine.ManagedHostId"
+                                                  RootPath="/"
+                                                  InitialPath="@StoragePickerInitialPath"
+                                                  Title="@($"Select {GetStorageRoleLabel(storagePickerRole)} storage")"
+                                                  AllowPopout="false"
+                                                  FolderSelected="ChooseStorageFolderAsync"
+                                                  FolderSelectLabel="Use this folder" />
+                    </ChildContent>
+                </UiModal>
+            }
+
+            @if(Embedded)
+            {
+                <AiProviderSwitcher Providers="@AvailableThreadProviders" Models="@selectedThreadContext!.Models"
+                    ProviderKey="@selectedThreadContext.Editor.ProviderKey" ProviderKeyChanged="HandleThreadProviderChangedAsync"
+                    ModelId="@selectedThreadContext.Editor.ModelId" ModelIdChanged="HandleThreadModelChangedAsync"
+                    Disabled="@(HasActiveRun || isApplyingProviderSelection)" Class="embedded-provider-switcher" />
+            }
+            @if (!IsHomeLabRoute && !Embedded)
+            {
+            <div class="workspace-thread-header">
+                <div class="workspace-thread-title">
+                    <label class="workspace-thread-title-field">
+                        <span>Chat title</span>
+                        <InputText @bind-Value="selectedThreadContext!.Editor.Title" />
+                    </label>
+                </div>
+                <div class="workspace-thread-actions">
+                    <div class="workspace-thread-menus">
+                        <div class="workspace-provider-switcher-card">
+                            @if (AvailableThreadProviders.Count == 0)
+                            {
+                                <div class="callout info">
+                                    No enabled runnable provider is configured. Add one in Provider settings.
+                                </div>
+                            }
+                            else
+                            {
+                                @if (!SelectedProviderDefinition.IsRuntimeImplemented)
+                                {
+                                    <div class="callout warning">
+                                        @SelectedProviderDefinition.RuntimeNotes
+                                    </div>
+                                }
+
+                                <AiProviderSwitcher Providers="@AvailableThreadProviders"
+                                                    Models="@selectedThreadContext!.Models"
+                                                    ProviderKey="@selectedThreadContext.Editor.ProviderKey"
+                                                    ProviderKeyChanged="HandleThreadProviderChangedAsync"
+                                                    ModelId="@selectedThreadContext.Editor.ModelId"
+                                                    ModelIdChanged="HandleThreadModelChangedAsync"
+                                                    Disabled="@(HasActiveRun || isSavingWorkspace || isApplyingProviderSelection)"
+                                                    ProviderLabel="AI provider"
+                                                    ModelLabel="Model"
+                                                    Class="workspace-provider-switcher" />
+                            }
+                        </div>
+
+                        <details class="workspace-popover">
+                            <summary class="workspace-menu-button">
+                                <span class="workspace-menu-label">Machines</span>
+                                <span class="workspace-menu-value">@MachineScopeLabel</span>
+                            </summary>
+                            <div class="workspace-menu-panel workspace-menu-panel-wide">
+                                <p class="helper-text">@ServerContextSummary</p>
+
+                                @if (EffectiveAttachedServers.Count > 0)
+                                {
+                                    <div class="selection-pill-row compact">
+                                        @foreach (var server in EffectiveAttachedServers)
+                                        {
+                                            <span class="selection-pill">@server.ServerName</span>
+                                        }
+                                    </div>
+                                }
+
+                                @if (selectedThreadContext.AvailableServers.Count == 0)
+                                {
+                                    <div class="empty-state">
+                                        @(UsesImplicitLocalMachine
+                                            ? "No saved machine profiles. This chat still uses the local Linux Made Sane machine by default."
+                                            : "No machine profiles available.")
+                                    </div>
+                                }
+                                else
+                                {
+                                    <div class="compact-picker-list">
+                                        @foreach (var server in selectedThreadContext.AvailableServers)
+                                        {
+                                            <button class="compact-picker-option @(IsServerSelected(server.Id) ? "selected" : string.Empty)"
+                                                    type="button"
+                                                    @onclick="(() => ToggleServer(server.Id))">
+                                                <div class="stack-tight">
+                                                    <strong>@server.Name</strong>
+                                                    <span class="meta-text">@server.Hostname:@server.Port</span>
+                                                </div>
+                                                <span class="status-pill @(IsServerSelected(server.Id) ? "success" : "neutral")">
+                                                    @(IsServerSelected(server.Id) ? "Linked" : "Available")
+                                                </span>
+                                            </button>
+                                        }
+                                    </div>
+                                }
+                            </div>
+                        </details>
+                    </div>
+
+                    <div class="workspace-thread-command-bar">
+                        <UiCommandButton Label="@(isCreatingThread ? "Creating..." : "New chat")"
+                                         Glyph="UiIconGlyph.Plus"
+                                         Variant="UiButtonVariant.Toolbar"
+                                         Class="workspace-quick-button"
+                                         OnClick="CreateThreadAndNavigateAsync"
+                                         Disabled="@isCreatingThread" />
+                        <UiCommandButton Label="@(isSavingWorkspace ? "Saving..." : "Save")"
+                                         Glyph="UiIconGlyph.Connect"
+                                         Variant="UiButtonVariant.Action"
+                                         OnClick="SaveWorkspaceAsync"
+                                         Disabled="@isSavingWorkspace" />
+                        @if (CanCancelRun)
+                        {
+                            <UiCommandButton Label="Cancel run" Glyph="UiIconGlyph.Interrupt" Variant="UiButtonVariant.Danger" OnClick="RequestRunCancellationAsync" />
+                        }
+                    </div>
+                </div>
+            </div>
+            }
+
+            <div class="ai-chat-workbench">
+            <section class="ai-chat-conversation-pane">
+            <div class="chat-history-shell">
+                <div class="table-header">
+                    <h2 class="section-title-compact">Conversation timeline</h2>
+                    @if (IsResponseNeeded)
+                    {
+                        <span class="status-pill warning">Waiting for your reply</span>
+                    }
+                    @if (!IsHomeLabRoute && !Embedded)
+                    {
+                        <div class="row-action-cluster">
+                            <span>@workspace!.Timeline.Count item(s)</span>
+                            <UiCommandButton Label="@(isClearingConversation ? "Clearing..." : "Clear conversation")"
+                                             Glyph="UiIconGlyph.Clear"
+                                             Variant="UiButtonVariant.Toolbar"
+                                             OnClick="ConfirmAndClearConversationAsync"
+                                             Disabled="@(HasActiveRun || isClearingConversation || !HasPersistedConversationState)" />
+                        </div>
+                    }
+                </div>
+
+                @if (workspace!.Timeline.Count == 0)
+                {
+                    <div class="empty-state">
+                        No events yet.
+                    </div>
+                }
+                else
+                {
+                    <div class="chat-history-list" @ref="timelineElement">
+                        @foreach (var timelineItem in workspace.Timeline)
+                        {
+                            if (timelineItem is AiChatMessageTimelineItemViewModel messageItem)
+                            {
+                                var message = messageItem.Message;
+
+                                <article class="chat-message-card @GetMessageCardClass(message) @(IsAssistantResponseNeeded(message) ? "chat-message-needs-response" : string.Empty)">
+                                    <div class="chat-card-header">
+                                        <div class="row-action-cluster">
+                                            <span class="status-pill @GetMessagePillClass(message.Role)">@GetMessageRoleLabel(message.Role)</span>
+                                            @if (IsAssistantResponseNeeded(message))
+                                            {
+                                                <span class="status-pill warning">Needs your response</span>
+                                            }
+                                            <span class="meta-text">#@message.SequenceNumber</span>
+                                            <span class="meta-text">@message.CreatedAtUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm")</span>
+                                        </div>
+                                        @if (!IsHomeLabRoute && !Embedded)
+                                        {
+                                            <div class="row-action-cluster">
+                                                <UiCommandButton Label="@(IsMutatingMessage(message.Id) ? "Removing..." : "Remove")"
+                                                                 Glyph="UiIconGlyph.Delete"
+                                                                 Variant="UiButtonVariant.Toolbar"
+                                                                 OnClick="@(() => ConfirmAndRemoveMessageAsync(message.Id, false))"
+                                                                 Disabled="@(HasActiveRun || IsMutatingMessage(message.Id))" />
+                                                @if (message.Role == AiChatMessageRole.User)
+                                                {
+                                                    <UiCommandButton Label="Trim here"
+                                                                     Glyph="UiIconGlyph.Cut"
+                                                                     Variant="UiButtonVariant.Toolbar"
+                                                                     OnClick="@(() => ConfirmAndRemoveMessageAsync(message.Id, true))"
+                                                                     Disabled="@(HasActiveRun || IsMutatingMessage(message.Id))" />
+                                                }
+                                            </div>
+                                        }
+                                    </div>
+                                    @if(Embedded && message.Role==AiChatMessageRole.User && ReferenceEquals(timelineItem,workspace.Timeline.FirstOrDefault()))
+                                    { <details><summary>Log excerpt and question shared with AI</summary><p class="chat-message-content">@message.Content</p></details> }
+                                    else
+                                    { <p class="chat-message-content">@message.Content</p> }
+                                </article>
+                            }
+                            else if (timelineItem is AiChatToolExecutionTimelineItemViewModel toolItem)
+                            {
+                                <article class="chat-message-card tool-event-card @GetToolEventCardClass(toolItem)">
+                                    <div class="chat-card-header">
+                                        <div class="row-action-cluster">
+                                            <span class="status-pill warning">LMS action</span>
+                                            <span class="status-pill @GetToolStatusPillClass(toolItem.Status)">@GetToolStatusLabel(toolItem.Status)</span>
+                                            @if (toolItem.SafeChange is not null)
+                                            {
+                                                <span class="status-pill neutral">@toolItem.RiskLevel</span>
+                                            }
+                                            <span class="meta-text">@toolItem.ToolName</span>
+                                            <span class="meta-text">@toolItem.StartedAtUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm")</span>
+                                        </div>
+                                        @if (toolItem.IsCommandExecution && toolItem.Status != AiInvocationStatus.Running)
+                                        {
+                                            <div class="row-action-cluster">
+                                                <UiCommandButton Label="@(IsMutatingTool(toolItem.InvocationId) ? "Working..." : "Re-run command")"
+                                                                 Glyph="UiIconGlyph.Run"
+                                                                 Variant="UiButtonVariant.Toolbar"
+                                                                 OnClick="@(() => ReRunCommandAsync(toolItem.InvocationId))"
+                                                                 Disabled="@(HasActiveRun || IsMutatingTool(toolItem.InvocationId))" />
+                                                <UiCommandButton Label="Ask AI to retry"
+                                                                 Glyph="UiIconGlyph.Ai"
+                                                                 Variant="UiButtonVariant.Toolbar"
+                                                                 OnClick="@(() => AskAiToRetryCommandAsync(toolItem.InvocationId))"
+                                                                 Disabled="@(HasActiveRun || IsMutatingTool(toolItem.InvocationId))" />
+                                                @if (CanRequestRollback(toolItem))
+                                                {
+                                                    <UiIconButton Label="Rollback"
+                                                                  Title="Rollback this change"
+                                                                  Glyph="UiIconGlyph.Refresh"
+                                                                  Variant="UiButtonVariant.Ghost"
+                                                                  OnClick="@(() => RequestRollbackAsync(toolItem))"
+                                                                  Disabled="@(HasActiveRun || IsMutatingTool(toolItem.InvocationId))" />
+                                                }
+                                            </div>
+                                        }
+                                    </div>
+                                    <p class="chat-message-content">@toolItem.Title</p>
+                                    <p class="meta-text">@toolItem.Summary</p>
+
+                                    <div class="tool-event-meta-grid">
+                                        @if (!string.IsNullOrWhiteSpace(toolItem.TargetServerName))
+                                        {
+                                            <span class="meta-text"><strong>Target</strong> @toolItem.TargetServerName</span>
+                                        }
+                                        <span class="meta-text"><strong>Started</strong> @toolItem.StartedAtUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss")</span>
+                                        <span class="meta-text"><strong>Ended</strong> @FormatCompletedAt(toolItem.CompletedAtUtc)</span>
+                                        @if (toolItem.ExitCode.HasValue)
+                                        {
+                                            <span class="meta-text"><strong>Exit code</strong> @toolItem.ExitCode.Value</span>
+                                        }
+                                        @if (toolItem.SafeChange is not null)
+                                        {
+                                            <span class="meta-text"><strong>Rollback</strong> @toolItem.SafeChange.RollbackPlan.SupportLevel</span>
+                                        }
+                                    </div>
+
+                                    <details class="tool-event-details" open="@toolItem.IsFailure">
+                                        <summary>@GetToolDetailsLabel(toolItem)</summary>
+                                        <div class="tool-output-panel">
+                                            @if (!string.IsNullOrWhiteSpace(toolItem.CommandText))
+                                            {
+                                                <div class="tool-output-block">
+                                                    <span class="selection-title">Command</span>
+                                                    <pre class="command-preview-block command-display-block">@FormatCommandForDisplay(toolItem.CommandText)</pre>
+                                                </div>
+                                            }
+
+                                            @if (toolItem.SafeChange is not null)
+                                            {
+                                                <div class="tool-output-block safe-change-block">
+                                                    <span class="selection-title">What changed</span>
+                                                    <p class="meta-text">@(string.IsNullOrWhiteSpace(toolItem.SafeChange.ChangeSummary) ? toolItem.SafeChange.ImpactPreview.WhatWillChange : toolItem.SafeChange.ChangeSummary)</p>
+                                                    <p class="helper-text">@toolItem.SafeChange.ImpactPreview.WhyItIsNeeded</p>
+                                                </div>
+
+                                                <div class="tool-output-block safe-change-block">
+                                                    <span class="selection-title">Verification result</span>
+                                                    @if (toolItem.SafeChange.VerificationResult is null)
+                                                    {
+                                                        <p class="meta-text">Verification has not been recorded yet.</p>
+                                                    }
+                                                    else
+                                                    {
+                                                        <p class="meta-text">@toolItem.SafeChange.VerificationResult.Summary</p>
+                                                        <ul class="safe-change-list">
+                                                            @foreach (var step in toolItem.SafeChange.VerificationResult.Steps)
+                                                            {
+                                                                <li class="@(step.Succeeded ? "safe-change-step-success" : "safe-change-step-failure")">
+                                                                    <strong>@step.Label</strong> @step.Details
+                                                                </li>
+                                                            }
+                                                        </ul>
+                                                    }
+                                                </div>
+
+                                                <details class="tool-output-block safe-change-detail-panel">
+                                                    <summary class="selection-title">Snapshot and rollback details</summary>
+                                                    <div class="stack-tight">
+                                                        <p class="meta-text"><strong>Rollback support</strong> @toolItem.SafeChange.RollbackPlan.SupportLevel</p>
+                                                        <p class="meta-text">@toolItem.SafeChange.RollbackPlan.Summary</p>
+                                                        @if (toolItem.SafeChange.Snapshot is not null)
+                                                        {
+                                                            <p class="meta-text"><strong>Snapshot</strong> @toolItem.SafeChange.Snapshot.Id</p>
+                                                            <p class="meta-text">@toolItem.SafeChange.Snapshot.Summary</p>
+                                                            <ul class="safe-change-list">
+                                                                @foreach (var item in toolItem.SafeChange.Snapshot.CapturedItems)
+                                                                {
+                                                                    <li>@item</li>
+                                                                }
+                                                            </ul>
+                                                        }
+                                                        @if (toolItem.SafeChange.RollbackResult is not null)
+                                                        {
+                                                            <p class="meta-text"><strong>Rollback result</strong> @toolItem.SafeChange.RollbackResult.Summary</p>
+                                                            <ul class="safe-change-list">
+                                                                @foreach (var item in toolItem.SafeChange.RollbackResult.RestoredItems)
+                                                                {
+                                                                    <li>@item</li>
+                                                                }
+                                                                @foreach (var item in toolItem.SafeChange.RollbackResult.RemainingItems)
+                                                                {
+                                                                    <li class="safe-change-step-failure">@item</li>
+                                                                }
+                                                            </ul>
+                                                        }
+                                                    </div>
+                                                </details>
+                                            }
+
+                                            @if (toolItem.Status == AiInvocationStatus.Running && !toolItem.IsProgressiveOutputAvailable)
+                                            {
+                                                <p class="helper-text">
+                                                    Running. Output appears when the command finishes.
+                                                </p>
+                                            }
+
+                                            @if (!string.IsNullOrWhiteSpace(toolItem.StandardOutput))
+                                            {
+                                                <div class="tool-output-block">
+                                                    <span class="selection-title">stdout</span>
+                                                    <pre class="command-preview-block tool-text-block">@toolItem.StandardOutput</pre>
+                                                </div>
+                                            }
+
+                                            @if (!string.IsNullOrWhiteSpace(toolItem.StandardError))
+                                            {
+                                                <div class="tool-output-block tool-output-block-failure">
+                                                    <span class="selection-title">stderr</span>
+                                                    <pre class="command-preview-block tool-text-block">@toolItem.StandardError</pre>
+                                                </div>
+                                            }
+
+                                            @if (!string.IsNullOrWhiteSpace(toolItem.OutputText))
+                                            {
+                                                <div class="tool-output-block">
+                                                    <span class="selection-title">Output</span>
+                                                    <pre class="command-preview-block tool-text-block">@toolItem.OutputText</pre>
+                                                </div>
+                                            }
+
+                                            @if (!string.IsNullOrWhiteSpace(toolItem.PayloadText))
+                                            {
+                                                <div class="tool-output-block">
+                                                    <span class="selection-title">Structured payload</span>
+                                                    <pre class="command-preview-block tool-text-block">@toolItem.PayloadText</pre>
+                                                </div>
+                                            }
+                                        </div>
+                                    </details>
+                                </article>
+                            }
+                        }
+                    </div>
+                }
+
+            </div>
+            </section>
+
+            <aside class="ai-chat-action-pane" aria-label="Prompt and actions">
+                <div class="ai-action-heading">
+                    <h2>@(IsResponseNeeded ? "Reply to LMS" : "Ask LMS")</h2>
+                    @if (IsResponseNeeded)
+                    {
+                        <span class="ai-input-needed ai-input-needed-strong" role="status" aria-live="polite">
+                            <span class="ai-input-needed-dot" aria-hidden="true"></span>
+                            Response needed
+                        </span>
+                    }
+                    else if (IsWaitingForUserInput)
+                    {
+                        <span class="ai-input-needed" role="status" aria-live="polite">
+                            <span class="ai-input-needed-dot" aria-hidden="true"></span>
+                            Waiting for your input
+                        </span>
+                    }
+                    else if (HasActiveRun)
+                    {
+                        <span class="ai-input-needed" role="status" aria-live="polite">
+                            <span class="ai-input-needed-dot" aria-hidden="true"></span>
+                            Working · you can add context
+                        </span>
+                    }
+                </div>
+
+                <EditForm Model="@messageComposer"
+                          OnValidSubmit="SendMessageAsync"
+                          class="@(IsResponseNeeded ? "stack-form chat-compose-form awaiting-user-input chat-compose-response-needed" : "stack-form chat-compose-form")">
+                    <DataAnnotationsValidator />
+
+                    @if (!string.IsNullOrWhiteSpace(messageError))
+                    {
+                        <div class="callout error">@messageError</div>
+                    }
+
+                    <label>
+                        <span>@(IsResponseNeeded ? "Your response" : "What do you need?")</span>
+                        <InputTextArea @bind-Value="messageComposer.Content"
+                                       placeholder="@(IsResponseNeeded ? "Answer the highlighted question..." : HasActiveRun ? "Add context or tell LMS what to do next..." : "Ask a question or describe what needs fixing.")" />
+                        <ValidationMessage For="@(() => messageComposer.Content)" />
+                    </label>
+
+                    <div class="hero-actions">
+                        <UiCommandButton Label="@(isSendingMessage ? "Sending..." : HasActiveRun ? "Add instruction" : IsResponseNeeded ? "Send response" : "Send")"
+                                         Glyph="UiIconGlyph.Send"
+                                         Type="submit"
+                                         Disabled="@isSendingMessage" />
+                        @if (CanCancelRun)
+                        {
+                            <UiCommandButton Label="Cancel" Glyph="UiIconGlyph.Interrupt" Variant="UiButtonVariant.Danger" OnClick="RequestRunCancellationAsync" />
+                        }
+                    </div>
+                </EditForm>
+
+                @if (!string.IsNullOrWhiteSpace(workspaceError))
+                {
+                    <div class="callout error">@workspaceError</div>
+                }
+
+                @if (requiredHomeLabVpnGateways.Count > 0)
+                {
+                    <div class="surface-subcard home-lab-vpn-gateway-choice-card awaiting-user-input">
+                        <div class="stack-tight">
+                            <strong>Choose the VPN Gateway for this install</strong>
+                            <p class="helper-text">Select the gateway that should carry the routed apps. LMS will continue the installation after you choose.</p>
+                        </div>
+
+                        <div class="home-lab-vpn-gateway-choice-grid">
+                            @foreach (var gateway in requiredHomeLabVpnGateways)
+                            {
+                                <div class="home-lab-vpn-gateway-choice-row">
+                                    <div class="stack-tight">
+                                        <strong>@gateway.Name</strong>
+                                        <span class="meta-text">@gateway.HealthState · @gateway.InstallationId</span>
+                                    </div>
+                                    <UiCommandButton Label="Use this gateway"
+                                                     Glyph="UiIconGlyph.Connect"
+                                                     Variant="UiButtonVariant.Action"
+                                                     Disabled="@(isSendingMessage || isSelectingHomeLabVpnGateway || HasActiveRun)"
+                                                     OnClick="@(() => SelectHomeLabVpnGatewayAsync(gateway))" />
+                                </div>
+                            }
+                        </div>
+                    </div>
+                }
+
+                @if (requiredHomeLabStorageRoles.Count > 0)
+                {
+                    <div class="surface-subcard home-lab-storage-choice-card awaiting-user-input">
+                        <div class="stack-tight">
+                            <strong>Choose storage folders</strong>
+                            <p class="helper-text">Select each folder here. LMS will save the choices and continue this setup automatically.</p>
+                        </div>
+
+                        <div class="home-lab-storage-choice-grid">
+                            @foreach (var role in requiredHomeLabStorageRoles)
+                            {
+                                <div class="home-lab-storage-choice-row">
+                                    <div class="stack-tight">
+                                        <strong>@GetStorageRoleLabel(role)</strong>
+                                        <span class="meta-text">@(GetSelectedStoragePath(role) ?? "No folder selected")</span>
+                                    </div>
+                                    <div class="row-action-cluster">
+                                        <UiCommandButton Label="Use suggested folder"
+                                                         Title="@GetSuggestedStoragePath(role)"
+                                                         Glyph="UiIconGlyph.FolderClosed"
+                                                         Variant="UiButtonVariant.ActionSubtle"
+                                                         Disabled="@isSavingHomeLabStorage"
+                                                         OnClick="@(() => SelectSuggestedStoragePath(role))" />
+                                        <UiCommandButton Label="Choose folder"
+                                                         Glyph="UiIconGlyph.FolderOpen"
+                                                         Variant="UiButtonVariant.Ghost"
+                                                         Disabled="@isSavingHomeLabStorage"
+                                                         OnClick="@(() => OpenStorageFolderPicker(role))" />
+                                    </div>
+                                </div>
+                            }
+                        </div>
+
+                        @if (!string.IsNullOrWhiteSpace(homeLabStorageError))
+                        {
+                            <div class="callout error">@homeLabStorageError</div>
+                        }
+
+                        <div class="hero-actions">
+                            <UiCommandButton Label="@(isSavingHomeLabStorage ? "Saving and continuing..." : "Save folders and continue setup")"
+                                             Glyph="UiIconGlyph.Save"
+                                             Variant="UiButtonVariant.Primary"
+                                             Disabled="@(isSavingHomeLabStorage || !CanSaveHomeLabStorage)"
+                                             OnClick="SaveHomeLabStorageAndContinueAsync" />
+                        </div>
+                    </div>
+                }
+
+                @if (ShouldDisplayRunStatus)
+                {
+                    <div class="callout @GetRunCalloutClass(DisplayedRun!.Status)">
+                        <div class="workspace-run-status">
+                            <strong>@GetRunStatusLabel(DisplayedRun!.Status)</strong>
+                            <span class="meta-text">Updated @DisplayedRun!.UpdatedAtUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss")</span>
+                        </div>
+                        <p class="chat-run-summary">@DisplayedRun!.StatusSummary</p>
+                        @if (!string.IsNullOrWhiteSpace(DisplayedRun!.LastError))
+                        {
+                            <pre class="command-preview-block">@DisplayedRun!.LastError</pre>
+                        }
+                    </div>
+                }
+
+                @if (PendingApprovalRequests.Count > 0 || !string.IsNullOrWhiteSpace(approvalError))
+                {
+                    <div class="surface-subcard approval-card awaiting-user-input">
+                    @if (!string.IsNullOrWhiteSpace(approvalError))
+                    {
+                        <div class="callout error">@approvalError</div>
+                    }
+
+                    @foreach (var request in PendingApprovalRequests)
+                    {
+                        <div class="stack-form">
+                            <div>
+                                <strong>LMS needs your OK</strong>
+                                <p class="chat-message-content">@request.Summary</p>
+                                <p class="helper-text">Runs with sudo on this LMS server.</p>
+                            </div>
+
+                            @if (!string.IsNullOrWhiteSpace(request.CommandPreview))
+                            {
+                                <details>
+                                    <summary>Show command</summary>
+                                    <pre class="command-preview-block command-display-block">@FormatCommandForDisplay(request.CommandPreview)</pre>
+                                </details>
+                            }
+
+                            <div class="hero-actions">
+                                <UiCommandButton Label="@(IsSubmittingApproval(request.Id) ? "Running..." : "Allow and run with sudo")"
+                                                 Glyph="UiIconGlyph.Run"
+                                                 Variant="UiButtonVariant.Action"
+                                                 OnClick="@(() => SubmitApprovalDecisionAsync(request.Id, AiApprovalDecisionType.ApproveOnce))"
+                                                 Disabled="@IsSubmittingApproval(request.Id)" />
+                                <UiCommandButton Label="Cancel"
+                                                 Glyph="UiIconGlyph.Disconnect"
+                                                 Variant="UiButtonVariant.Ghost"
+                                                 OnClick="@(() => SubmitApprovalDecisionAsync(request.Id, AiApprovalDecisionType.Deny))"
+                                                 Disabled="@IsSubmittingApproval(request.Id)" />
+                            </div>
+                        </div>
+                    }
+                    </div>
+                }
+            </aside>
+            </div>
+        </section>;
+
+    protected override async Task OnParametersSetAsync()
+    {
+        if(Embedded && hasLoadedOnce && workspace?.Thread.Id==ThreadId) return;
+        await LoadAsync();
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!scrollTimelineToEnd)
+        {
+            return;
+        }
+
+        scrollTimelineToEnd = false;
+        try
+        {
+            await JSRuntime.InvokeVoidAsync("lmsLayout.scrollToBottom", timelineElement, smoothTimelineScroll);
+        }
+        catch (JSDisconnectedException)
+        {
+        }
+    }
+
+    private async Task LoadAsync()
+    {
+        isLoaded = false;
+        loadingThreadId = ThreadId;
+        loadError = string.Empty;
+        workspaceError = string.Empty;
+        messageError = string.Empty;
+
+        try
+        {
+            await RefreshThreadsAsync();
+
+            if (IsNewRoute)
+            {
+                loadingThreadId = null;
+                await CreateThreadAndNavigateAsync();
+                return;
+            }
+
+            if (!ThreadId.HasValue)
+            {
+                loadingThreadId = null;
+                var firstThread = threads.FirstOrDefault(MatchesWorkspaceContext);
+                if (firstThread is not null)
+                {
+                    NavigationManager.NavigateTo(BuildThreadRoute(firstThread.Id), replace: true);
+                    return;
+                }
+
+                selectedThreadContext = null;
+                workspace = null;
+                SyncApprovalDrafts();
+                StopWorkspaceRefreshLoop();
+                return;
+            }
+
+            await LoadSelectedThreadAsync(ThreadId.Value);
+        }
+        catch (Exception exception)
+        {
+            selectedThreadContext = null;
+            workspace = null;
+            StopWorkspaceRefreshLoop();
+            loadError = exception.Message;
+        }
+        finally
+        {
+            loadingThreadId = null;
+            isLoaded = true;
+            hasLoadedOnce = true;
+        }
+    }
+
+    private async Task RefreshThreadsAsync()
+    {
+        if(Embedded) return;
+        threads = await ThreadService.ListThreadsAsync();
+    }
+
+    private async Task LoadSelectedThreadAsync(Guid threadId)
+    {
+        selectedThreadContext = await ThreadService.GetEditorAsync(threadId);
+        workspace = await ChatService.GetWorkspaceAsync(threadId);
+
+        SyncApprovalDrafts();
+        await SyncRequiredHomeLabStorageAsync();
+        await SyncRequiredHomeLabVpnGatewayChoiceAsync();
+        ScheduleTimelineScroll();
+        UpdateWorkspaceRefreshLoop();
+    }
+
+    private async Task RefreshWorkspaceAsync()
+    {
+        if (!ThreadId.HasValue)
+        {
+            return;
+        }
+
+        workspace = await ChatService.GetWorkspaceAsync(ThreadId.Value);
+        SyncApprovalDrafts();
+        await SyncRequiredHomeLabStorageAsync();
+        await SyncRequiredHomeLabVpnGatewayChoiceAsync();
+        ScheduleTimelineScroll();
+        ReturnToHomeLabWhenApprovedChangeCompletes();
+        UpdateWorkspaceRefreshLoop();
+    }
+
+    private async Task CreateThreadAndNavigateAsync()
+    {
+        isCreatingThread = true;
+
+        try
+        {
+            var threadId = await ThreadService.CreateThreadAsync();
+            NavigationManager.NavigateTo(BuildThreadRoute(threadId), replace: true);
+        }
+        catch (Exception exception)
+        {
+            workspaceError = exception.Message;
+            isLoaded = true;
+        }
+        finally
+        {
+            isCreatingThread = false;
+        }
+    }
+
+    private async Task SaveWorkspaceAsync()
+    {
+        if (!HasActiveWorkspace)
+        {
+            return;
+        }
+
+        isSavingWorkspace = true;
+        workspaceError = string.Empty;
+
+        try
+        {
+            var threadId = await ThreadService.SaveThreadAsync(selectedThreadContext!.Editor);
+            await RefreshThreadsAsync();
+            await LoadSelectedThreadAsync(threadId);
+        }
+        catch (Exception exception)
+        {
+            workspaceError = exception.Message;
+        }
+        finally
+        {
+            isSavingWorkspace = false;
+        }
+    }
+
+    private async Task SendMessageAsync()
+    {
+        if (!ThreadId.HasValue)
+        {
+            return;
+        }
+
+        isSendingMessage = true;
+        messageError = string.Empty;
+
+        try
+        {
+            await ChatService.SendUserMessageAsync(ThreadId.Value, messageComposer);
+            messageComposer = new AiChatMessageComposer();
+            await RefreshThreadsAsync();
+            await RefreshWorkspaceAsync();
+        }
+        catch (Exception exception)
+        {
+            messageError = exception.Message;
+        }
+        finally
+        {
+            isSendingMessage = false;
+        }
+    }
+
+    private async Task RequestRunCancellationAsync()
+    {
+        if (ActiveRun is null)
+        {
+            return;
+        }
+
+        messageError = string.Empty;
+
+        try
+        {
+            await ChatService.RequestCancellationAsync(ActiveRun.Id);
+            await RefreshThreadsAsync();
+            await RefreshWorkspaceAsync();
+        }
+        catch (Exception exception)
+        {
+            messageError = exception.Message;
+        }
+    }
+
+    private async Task ConfirmAndRemoveMessageAsync(Guid messageId, bool truncateFromMessage)
+    {
+        if (!ThreadId.HasValue)
+        {
+            return;
+        }
+
+        var confirmationText = truncateFromMessage
+            ? "Trim the conversation from this message onward? This resets the provider conversation state for the thread."
+            : "Remove this message? Removing a user message also removes its assistant replies for that turn.";
+        if (!await JSRuntime.InvokeAsync<bool>("confirm", confirmationText))
+        {
+            return;
+        }
+
+        mutatingMessageIds.Add(messageId);
+        messageError = string.Empty;
+
+        try
+        {
+            await ChatService.RemoveMessageAsync(ThreadId.Value, messageId, truncateFromMessage);
+            await RefreshThreadsAsync();
+            await RefreshWorkspaceAsync();
+        }
+        catch (Exception exception)
+        {
+            messageError = exception.Message;
+        }
+        finally
+        {
+            mutatingMessageIds.Remove(messageId);
+        }
+    }
+
+    private async Task ConfirmAndClearConversationAsync()
+    {
+        if (!ThreadId.HasValue)
+        {
+            return;
+        }
+
+        if (!await JSRuntime.InvokeAsync<bool>("confirm", "Clear the whole conversation for this thread? This removes messages, runs, approvals, command results, checkpoints, and resets the provider state."))
+        {
+            return;
+        }
+
+        isClearingConversation = true;
+        messageError = string.Empty;
+
+        try
+        {
+            await ChatService.ClearConversationAsync(ThreadId.Value);
+            await RefreshThreadsAsync();
+            await RefreshWorkspaceAsync();
+        }
+        catch (Exception exception)
+        {
+            messageError = exception.Message;
+        }
+        finally
+        {
+            isClearingConversation = false;
+        }
+    }
+
+    private async Task ReRunCommandAsync(Guid invocationId)
+    {
+        if (!ThreadId.HasValue)
+        {
+            return;
+        }
+
+        mutatingToolIds.Add(invocationId);
+        messageError = string.Empty;
+
+        try
+        {
+            await ChatService.ReRunCommandAsync(ThreadId.Value, invocationId);
+            await RefreshThreadsAsync();
+            await RefreshWorkspaceAsync();
+        }
+        catch (Exception exception)
+        {
+            messageError = exception.Message;
+        }
+        finally
+        {
+            mutatingToolIds.Remove(invocationId);
+        }
+    }
+
+    private async Task AskAiToRetryCommandAsync(Guid invocationId)
+    {
+        if (!ThreadId.HasValue)
+        {
+            return;
+        }
+
+        mutatingToolIds.Add(invocationId);
+        messageError = string.Empty;
+
+        try
+        {
+            await ChatService.AskAiToRetryCommandAsync(ThreadId.Value, invocationId);
+            await RefreshThreadsAsync();
+            await RefreshWorkspaceAsync();
+        }
+        catch (Exception exception)
+        {
+            messageError = exception.Message;
+        }
+        finally
+        {
+            mutatingToolIds.Remove(invocationId);
+        }
+    }
+
+    private async Task RequestRollbackAsync(AiChatToolExecutionTimelineItemViewModel toolItem)
+    {
+        if (!ThreadId.HasValue || !toolItem.ProposedActionId.HasValue)
+        {
+            return;
+        }
+
+        mutatingToolIds.Add(toolItem.InvocationId);
+        messageError = string.Empty;
+
+        try
+        {
+            await ChatService.RequestRollbackAsync(ThreadId.Value, toolItem.ProposedActionId.Value);
+            await RefreshThreadsAsync();
+            await RefreshWorkspaceAsync();
+        }
+        catch (Exception exception)
+        {
+            messageError = exception.Message;
+        }
+        finally
+        {
+            mutatingToolIds.Remove(toolItem.InvocationId);
+        }
+    }
+
+    private async Task HandleThreadProviderChangedAsync(string providerKey)
+    {
+        if (selectedThreadContext is null)
+        {
+            return;
+        }
+
+        selectedThreadContext.Editor.ProviderKey = providerKey;
+        SyncSelectedModelForCurrentProvider();
+        await ApplyThreadProviderSelectionAsync();
+    }
+
+    private async Task HandleThreadModelChangedAsync(string modelId)
+    {
+        if (selectedThreadContext is null)
+        {
+            return;
+        }
+
+        selectedThreadContext.Editor.ModelId = modelId;
+        await ApplyThreadProviderSelectionAsync();
+    }
+
+    private void SyncSelectedModelForCurrentProvider()
+    {
+        if (selectedThreadContext is null)
+        {
+            return;
+        }
+
+        var selection = AiProviderSelectionResolver.Resolve(
+            selectedThreadContext.Editor.ProviderKey,
+            selectedThreadContext.Editor.ModelId,
+            selectedThreadContext.Editor.ProviderKey,
+            string.Empty,
+            AvailableThreadProviders,
+            selectedThreadContext.Models);
+        selectedThreadContext.Editor.ProviderKey = selection.ProviderKey;
+        selectedThreadContext.Editor.ModelId = selection.ModelId;
+    }
+
+    private async Task ApplyThreadProviderSelectionAsync()
+    {
+        if (!HasActiveWorkspace || selectedThreadContext is null || workspace is null)
+        {
+            return;
+        }
+
+        var providerKey = selectedThreadContext.Editor.ProviderKey.Trim();
+        var modelId = selectedThreadContext.Editor.ModelId.Trim();
+        if (string.Equals(providerKey, workspace.Thread.ProviderKey, StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(modelId, workspace.Thread.ModelId, StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        isApplyingProviderSelection = true;
+        workspaceError = string.Empty;
+
+        try
+        {
+            await ThreadService.UpdateProviderSelectionAsync(workspace.Thread.Id, providerKey, modelId);
+            await RefreshThreadsAsync();
+            await RefreshWorkspaceAsync();
+        }
+        catch (Exception exception)
+        {
+            workspaceError = exception.Message;
+            selectedThreadContext.Editor.ProviderKey = workspace.Thread.ProviderKey;
+            selectedThreadContext.Editor.ModelId = workspace.Thread.ModelId;
+        }
+        finally
+        {
+            isApplyingProviderSelection = false;
+        }
+    }
+
+    private bool IsServerSelected(Guid serverId) =>
+        selectedThreadContext?.Editor.AttachedServerIds.Contains(serverId) ?? false;
+
+    private bool IsSubmittingApproval(Guid requestId) =>
+        submittingApprovalIds.Contains(requestId);
+
+    private bool IsMutatingMessage(Guid messageId) =>
+        mutatingMessageIds.Contains(messageId);
+
+    private bool IsMutatingTool(Guid invocationId) =>
+        mutatingToolIds.Contains(invocationId);
+
+    private AiProposedAction? GetProposedAction(Guid? proposedActionId) =>
+        !proposedActionId.HasValue || workspace is null
+            ? null
+            : workspace.ExecutionPlans
+                .SelectMany(plan => plan.Actions)
+                .FirstOrDefault(action => action.Id == proposedActionId.Value);
+
+    private static bool CanRequestRollback(AiChatToolExecutionTimelineItemViewModel toolItem) =>
+        toolItem.ProposedActionId.HasValue &&
+        !toolItem.ToolName.Equals(AiToolNames.RollbackSafeChange, StringComparison.OrdinalIgnoreCase) &&
+        toolItem.SafeChange?.SupportsRollback == true &&
+        toolItem.SafeChange.RollbackResult is null &&
+        toolItem.Status != AiInvocationStatus.Running;
+
+    private async Task SubmitApprovalDecisionAsync(Guid requestId, AiApprovalDecisionType decisionType)
+    {
+        approvalError = string.Empty;
+        submittingApprovalIds.Add(requestId);
+
+        var request = PendingApprovalRequests.FirstOrDefault(candidate => candidate.Id == requestId);
+        if (decisionType == AiApprovalDecisionType.ApproveOnce &&
+            request?.ProposedActionId is { } proposedActionId &&
+            IsHomeLabMutation(request.ToolName))
+        {
+            returnToHomeLabActionId = proposedActionId;
+        }
+        else
+        {
+            returnToHomeLabActionId = null;
+        }
+
+        try
+        {
+            await ApprovalService.DecideApprovalAsync(
+                requestId,
+                new AiApprovalDecisionCommand
+                {
+                    DecisionType = decisionType,
+                    ActorName = "LMS user",
+                    UserTrustLevel = AiUserTrustLevel.Standard,
+                    AdminOverrideUsed = false,
+                    RememberDecision = false,
+                    Reason = decisionType == AiApprovalDecisionType.Deny
+                        ? "User cancelled the requested change."
+                        : "User allowed this change to run with sudo."
+                });
+
+            await RefreshThreadsAsync();
+            await RefreshWorkspaceAsync();
+        }
+        catch (Exception exception)
+        {
+            returnToHomeLabActionId = null;
+            approvalError = exception.Message;
+        }
+        finally
+        {
+            submittingApprovalIds.Remove(requestId);
+        }
+    }
+
+    private void ToggleServer(Guid serverId)
+    {
+        if (selectedThreadContext is null)
+        {
+            return;
+        }
+
+        if (selectedThreadContext.Editor.AttachedServerIds.Contains(serverId))
+        {
+            selectedThreadContext.Editor.AttachedServerIds.Remove(serverId);
+        }
+        else
+        {
+            selectedThreadContext.Editor.AttachedServerIds.Add(serverId);
+        }
+    }
+
+    private Task HandleThreadTabChangedAsync(string? value)
+    {
+        if (Guid.TryParse(value, out var threadId))
+        {
+            NavigationManager.NavigateTo(BuildThreadRoute(threadId));
+        }
+
+        return Task.CompletedTask;
+    }
+
+    private void SetThreadFilter(ThreadSidebarFilter filter) =>
+        activeThreadFilter = filter;
+
+    private bool MatchesSearch(AiChatThreadListItemViewModel thread)
+    {
+        var search = threadSearch.Trim();
+        if (string.IsNullOrWhiteSpace(search))
+        {
+            return true;
+        }
+
+        return thread.Title.Contains(search, StringComparison.OrdinalIgnoreCase) ||
+               thread.ProviderLabel.Contains(search, StringComparison.OrdinalIgnoreCase) ||
+               thread.ModelId.Contains(search, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private bool MatchesWorkspaceContext(AiChatThreadListItemViewModel thread) =>
+        IsHomeLabRoute == IsHomeLabThreadTitle(thread.Title);
+
+    private static bool IsHomeLabThreadTitle(string title) =>
+        title.StartsWith("Home Lab ·", StringComparison.OrdinalIgnoreCase);
+
+    private bool MatchesFilter(AiChatThreadListItemViewModel thread) => activeThreadFilter switch
+    {
+        ThreadSidebarFilter.PendingApproval => thread.PendingApprovalCount > 0,
+        ThreadSidebarFilter.NoServers => thread.AttachedServerCount == 0,
+        _ => true
+    };
+
+    private static string GetMessageCardClass(AiChatMessage message) => message.Role switch
+    {
+        AiChatMessageRole.User => "chat-message-user",
+        AiChatMessageRole.Assistant => "chat-message-assistant",
+        AiChatMessageRole.System => "chat-message-system",
+        _ => "chat-message-system"
+    };
+
+    private static string GetMessageRoleLabel(AiChatMessageRole role) => role switch
+    {
+        AiChatMessageRole.User => "You",
+        AiChatMessageRole.Assistant => "AI",
+        AiChatMessageRole.System => "System",
+        _ => "Message"
+    };
+
+    private static string GetMessagePillClass(AiChatMessageRole role) => role switch
+    {
+        AiChatMessageRole.User => "success",
+        AiChatMessageRole.Assistant => "neutral",
+        AiChatMessageRole.System => "neutral",
+        _ => "neutral"
+    };
+
+    private static string GetToolEventCardClass(AiChatToolExecutionTimelineItemViewModel toolItem) =>
+        toolItem.IsFailure
+            ? "chat-message-tool chat-message-tool-failed"
+            : toolItem.Status == AiInvocationStatus.Running
+                ? "chat-message-tool chat-message-tool-running"
+                : "chat-message-tool";
+
+    private static string GetToolStatusPillClass(AiInvocationStatus status) => status switch
+    {
+        AiInvocationStatus.Succeeded => "success",
+        AiInvocationStatus.Failed => "failure",
+        AiInvocationStatus.Cancelled => "failure",
+        AiInvocationStatus.Running => "warning",
+        _ => "neutral"
+    };
+
+    private static string GetToolStatusLabel(AiInvocationStatus status) => status switch
+    {
+        AiInvocationStatus.Succeeded => "Completed",
+        AiInvocationStatus.Failed => "Failed",
+        AiInvocationStatus.Cancelled => "Stopped",
+        AiInvocationStatus.Running => "Running",
+        _ => "Pending"
+    };
+
+    private static string GetRunPillClass(AiChatRunStatus status) => status switch
+    {
+        AiChatRunStatus.Completed => "success",
+        AiChatRunStatus.Failed => "failure",
+        AiChatRunStatus.Cancelled => "failure",
+        AiChatRunStatus.AwaitingApproval => "warning",
+        _ => "neutral"
+    };
+
+    private static string GetRunStatusLabel(AiChatRunStatus status) => status switch
+    {
+        AiChatRunStatus.AwaitingApproval => "Approval needed below",
+        AiChatRunStatus.CancellationRequested => "Stopping",
+        _ => status.ToString()
+    };
+
+    private static string GetRunCalloutClass(AiChatRunStatus status) => status switch
+    {
+        AiChatRunStatus.Completed => "success",
+        AiChatRunStatus.Failed => "error",
+        AiChatRunStatus.Cancelled => "error",
+        AiChatRunStatus.AwaitingApproval => "warning",
+        _ => "info"
+    };
+
+    private static string GetToolDetailsLabel(AiChatToolExecutionTimelineItemViewModel toolItem) =>
+        toolItem.IsCommandExecution ? "Command result" : "Tool result";
+
+    private static string FormatCommandForDisplay(string commandText) =>
+        AiCommandDisplayFormatter.SanitizeDisplayText(commandText);
+
+    private static bool LooksLikeResponseRequest(string content)
+    {
+        var normalized = content.Trim();
+        if (normalized.Contains('?'))
+        {
+            return true;
+        }
+
+        string[] responseRequestPhrases =
+        [
+            "please tell me",
+            "please provide",
+            "please choose",
+            "please select",
+            "let me know",
+            "would you like",
+            "do you want",
+            "which ",
+            "what ",
+            "where ",
+            "how ",
+            "choose ",
+            "select ",
+            "confirm ",
+            "describe "
+        ];
+
+        return responseRequestPhrases.Any(phrase => normalized.Contains(phrase, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static string BuildThreadTabTooltip(AiChatThreadListItemViewModel thread) =>
+        $"{thread.Title} | {thread.ProviderLabel} | {thread.ModelId} | {BuildThreadScopeSummary(thread)} | {thread.MessageCount} message(s) | updated {thread.UpdatedAtUtc.ToLocalTime():yyyy-MM-dd HH:mm}";
+
+    private static string BuildThreadScopeSummary(AiChatThreadListItemViewModel thread) =>
+        thread.AttachedServerCount == 0
+            ? "this LMS server"
+            : $"{thread.AttachedServerCount} machine(s)";
+
+    private static string FormatCompletedAt(DateTimeOffset? completedAtUtc) =>
+        completedAtUtc.HasValue
+            ? completedAtUtc.Value.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss")
+            : "Still running";
+
+    private void ScheduleTimelineScroll()
+    {
+        if (workspace is null || workspace.Timeline.Count == 0)
+        {
+            return;
+        }
+
+        var key = $"{workspace.Timeline.Count}:{LatestRun?.UpdatedAtUtc.UtcTicks ?? 0}";
+        if (timelineScrollThreadId == workspace.Thread.Id &&
+            key.Equals(lastTimelineScrollKey, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        smoothTimelineScroll = timelineScrollThreadId == workspace.Thread.Id &&
+                               !string.IsNullOrEmpty(lastTimelineScrollKey);
+        timelineScrollThreadId = workspace.Thread.Id;
+        lastTimelineScrollKey = key;
+        scrollTimelineToEnd = true;
+    }
+
+    private void UpdateWorkspaceRefreshLoop()
+    {
+        if (ThreadId.HasValue && ShouldPollRun)
+        {
+            if (workspaceRefreshCancellationTokenSource is not null)
+            {
+                return;
+            }
+
+            workspaceRefreshCancellationTokenSource = new CancellationTokenSource();
+            workspaceRefreshTask = RunWorkspaceRefreshLoopAsync(ThreadId.Value, workspaceRefreshCancellationTokenSource.Token);
+            return;
+        }
+
+        StopWorkspaceRefreshLoop();
+    }
+
+    private async Task RunWorkspaceRefreshLoopAsync(Guid threadId, CancellationToken cancellationToken)
+    {
+        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(2));
+
+        try
+        {
+            while (await timer.WaitForNextTickAsync(cancellationToken))
+            {
+                await InvokeAsync(async () =>
+                {
+                    if (!ThreadId.HasValue || ThreadId.Value != threadId)
+                    {
+                        StopWorkspaceRefreshLoop();
+                        return;
+                    }
+
+                    try
+                    {
+                        await RefreshThreadsAsync();
+                        workspace = await ChatService.GetWorkspaceAsync(threadId);
+                        SyncApprovalDrafts();
+                        await SyncRequiredHomeLabStorageAsync();
+                        await SyncRequiredHomeLabVpnGatewayChoiceAsync();
+                        ScheduleTimelineScroll();
+                        ReturnToHomeLabWhenApprovedChangeCompletes();
+                        UpdateWorkspaceRefreshLoop();
+                    }
+                    catch (Exception exception)
+                    {
+                        workspaceError = $"Workspace refresh failed: {exception.Message}";
+                        StopWorkspaceRefreshLoop();
+                    }
+
+                    StateHasChanged();
+                });
+            }
+        }
+        catch (OperationCanceledException)
+        {
+        }
+    }
+
+    private void StopWorkspaceRefreshLoop()
+    {
+        if (workspaceRefreshCancellationTokenSource is null)
+        {
+            return;
+        }
+
+        workspaceRefreshCancellationTokenSource.Cancel();
+        workspaceRefreshCancellationTokenSource.Dispose();
+        workspaceRefreshCancellationTokenSource = null;
+        workspaceRefreshTask = null;
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        var refreshTask = workspaceRefreshTask;
+        StopWorkspaceRefreshLoop();
+
+        if (refreshTask is not null)
+        {
+            try
+            {
+                await refreshTask;
+            }
+            catch (OperationCanceledException)
+            {
+            }
+        }
+    }
+
+    private void SyncApprovalDrafts()
+    {
+        var pendingIds = PendingApprovalRequests
+            .Select(request => request.Id)
+            .ToHashSet();
+        submittingApprovalIds.RemoveWhere(id => !pendingIds.Contains(id));
+    }
+
+    private async Task SyncRequiredHomeLabStorageAsync()
+    {
+        if (workspace is null)
+        {
+            return;
+        }
+
+        var invocation = workspace.Timeline
+            .OfType<AiChatToolExecutionTimelineItemViewModel>()
+            .Where(item => item.ToolName.Equals(AiToolNames.ApplyHomeLabPromptRecipe, StringComparison.OrdinalIgnoreCase))
+            .OrderByDescending(item => item.StartedAtUtc)
+            .FirstOrDefault();
+        if (invocation is null || processedStorageSetupInvocationId == invocation.InvocationId)
+        {
+            return;
+        }
+
+        processedStorageSetupInvocationId = invocation.InvocationId;
+        var requestedRoles = invocation.Status == AiInvocationStatus.Failed
+            ? GetRequiredStorageRoles(invocation.PayloadText)
+            : [];
+        if (requestedRoles.Count == 0)
+        {
+            requiredHomeLabStorageRoles = [];
+            selectedHomeLabStoragePaths.Clear();
+            storagePickerRole = null;
+            homeLabStorageError = string.Empty;
+            return;
+        }
+
+        var homeLabWorkspace = await HomeLabService.GetWorkspaceAsync();
+        requiredHomeLabStorageRoles = requestedRoles
+            .Where(role => homeLabWorkspace.StorageRoles.All(saved =>
+                !saved.Role.Equals(role, StringComparison.OrdinalIgnoreCase) ||
+                string.IsNullOrWhiteSpace(saved.HostPath)))
+            .ToArray();
+        selectedHomeLabStoragePaths.Clear();
+        storagePickerRole = null;
+        homeLabStorageError = string.Empty;
+    }
+
+    private async Task SyncRequiredHomeLabVpnGatewayChoiceAsync()
+    {
+        if (workspace is null)
+        {
+            requiredHomeLabVpnGateways = [];
+            requiredHomeLabVpnGatewayInvocationId = null;
+            return;
+        }
+
+        var invocation = workspace.Timeline
+            .OfType<AiChatToolExecutionTimelineItemViewModel>()
+            .Where(item => item.ToolName.Equals(AiToolNames.ApplyHomeLabPromptRecipe, StringComparison.OrdinalIgnoreCase))
+            .OrderByDescending(item => item.StartedAtUtc)
+            .FirstOrDefault();
+        if (invocation is null ||
+            invocation.Status != AiInvocationStatus.Failed ||
+            invocation.InvocationId == dismissedVpnGatewayChoiceInvocationId)
+        {
+            requiredHomeLabVpnGateways = [];
+            requiredHomeLabVpnGatewayInvocationId = invocation?.InvocationId;
+            return;
+        }
+
+        if (invocation.InvocationId == requiredHomeLabVpnGatewayInvocationId &&
+            requiredHomeLabVpnGateways.Count > 0)
+        {
+            return;
+        }
+
+        ApplyHomeLabPromptRecipeToolResponse? response = null;
+        try
+        {
+            response = JsonSerializer.Deserialize<ApplyHomeLabPromptRecipeToolResponse>(
+                invocation.PayloadText,
+                ToolPayloadSerializerOptions);
+        }
+        catch (JsonException)
+        {
+        }
+
+        var choices = response?.RequiredVpnGateways;
+        var needsGatewayChoice = response?.Details.Any(detail =>
+                detail.Contains("Several VPN Gateways", StringComparison.OrdinalIgnoreCase)) == true ||
+            invocation.OutputText.Contains("Several VPN Gateways", StringComparison.OrdinalIgnoreCase);
+        if ((choices is null || choices.Count == 0) && needsGatewayChoice)
+        {
+            var homeLabWorkspace = await HomeLabService.GetWorkspaceAsync();
+            choices = homeLabWorkspace.Installations
+                .Where(item => item.AppId.Equals("vpn-gateway", StringComparison.OrdinalIgnoreCase))
+                .Select(item => new HomeLabAiGateway(
+                    item.Id,
+                    item.DisplayName,
+                    item.HealthState.ToString(),
+                    item.HealthDetail))
+                .ToArray();
+        }
+
+        requiredHomeLabVpnGateways = choices ?? [];
+        requiredHomeLabVpnGatewayInvocationId = invocation.InvocationId;
+    }
+
+    private async Task SelectHomeLabVpnGatewayAsync(HomeLabAiGateway gateway)
+    {
+        if (!ThreadId.HasValue ||
+            isSendingMessage ||
+            isSelectingHomeLabVpnGateway ||
+            HasActiveRun)
+        {
+            return;
+        }
+
+        isSelectingHomeLabVpnGateway = true;
+        messageError = string.Empty;
+        dismissedVpnGatewayChoiceInvocationId = requiredHomeLabVpnGatewayInvocationId;
+
+        try
+        {
+            await ChatService.SendUserMessageAsync(
+                ThreadId.Value,
+                new AiChatMessageComposer
+                {
+                    Content = $"Use the existing VPN Gateway \"{gateway.Name}\" with installation ID {gateway.InstallationId} for the requested Home Lab installation and continue now."
+                });
+            requiredHomeLabVpnGateways = [];
+            await RefreshThreadsAsync();
+            await RefreshWorkspaceAsync();
+        }
+        catch (Exception exception)
+        {
+            messageError = exception.Message;
+        }
+        finally
+        {
+            isSelectingHomeLabVpnGateway = false;
+        }
+    }
+
+    private static IReadOnlyList<string> GetRequiredStorageRoles(string payloadText)
+    {
+        ApplyHomeLabPromptRecipeToolResponse? response = null;
+        try
+        {
+            response = JsonSerializer.Deserialize<ApplyHomeLabPromptRecipeToolResponse>(
+                payloadText,
+                ToolPayloadSerializerOptions);
+        }
+        catch (JsonException)
+        {
+        }
+
+        var explicitRoles = response?.RequiredStorageRoles?
+            .Where(role => KnownHomeLabStorageRoles.Contains(role, StringComparer.OrdinalIgnoreCase))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray() ?? [];
+        if (explicitRoles.Length > 0)
+        {
+            return explicitRoles;
+        }
+
+        var details = response?.Details ?? [];
+        return KnownHomeLabStorageRoles
+            .Where(role => details.Any(detail =>
+                detail.Contains($"'{role}'", StringComparison.OrdinalIgnoreCase)))
+            .ToArray();
+    }
+
+    private string? GetSelectedStoragePath(string role) =>
+        selectedHomeLabStoragePaths.TryGetValue(role, out var path) && !string.IsNullOrWhiteSpace(path)
+            ? path
+            : null;
+
+    private static string GetSuggestedStoragePath(string role) =>
+        $"/mnt/storage/{role}";
+
+    private static string GetStorageRoleLabel(string role) => role switch
+    {
+        "tv" => "TV",
+        _ => char.ToUpperInvariant(role[0]) + role[1..]
+    };
+
+    private void SelectSuggestedStoragePath(string role)
+    {
+        selectedHomeLabStoragePaths[role] = GetSuggestedStoragePath(role);
+        homeLabStorageError = string.Empty;
+    }
+
+    private void OpenStorageFolderPicker(string role)
+    {
+        storagePickerRole = role;
+        homeLabStorageError = string.Empty;
+    }
+
+    private void CloseStorageFolderPicker() =>
+        storagePickerRole = null;
+
+    private Task ChooseStorageFolderAsync(string path)
+    {
+        if (storagePickerRole is { } role && !string.IsNullOrWhiteSpace(path))
+        {
+            selectedHomeLabStoragePaths[role] = path;
+        }
+
+        storagePickerRole = null;
+        return Task.CompletedTask;
+    }
+
+    private async Task SaveHomeLabStorageAndContinueAsync()
+    {
+        if (!ThreadId.HasValue || !CanSaveHomeLabStorage)
+        {
+            return;
+        }
+
+        isSavingHomeLabStorage = true;
+        homeLabStorageError = string.Empty;
+        try
+        {
+            foreach (var role in requiredHomeLabStorageRoles)
+            {
+                await HomeLabService.SaveStorageRoleAsync(role, selectedHomeLabStoragePaths[role]);
+            }
+
+            await ChatService.SendUserMessageAsync(
+                ThreadId.Value,
+                new AiChatMessageComposer
+                {
+                    Content = "I selected and saved all required shared storage roles using the LMS folder controls. Continue this same Home Lab setup now."
+                });
+            requiredHomeLabStorageRoles = [];
+            selectedHomeLabStoragePaths.Clear();
+            storagePickerRole = null;
+            await RefreshThreadsAsync();
+            await RefreshWorkspaceAsync();
+        }
+        catch (Exception exception)
+        {
+            homeLabStorageError = exception.Message;
+        }
+        finally
+        {
+            isSavingHomeLabStorage = false;
+        }
+    }
+
+    private void ReturnToHomeLabWhenApprovedChangeCompletes()
+    {
+        if (returnToHomeLabActionId is not { } proposedActionId || workspace is null)
+        {
+            return;
+        }
+
+        var invocation = workspace.Timeline
+            .OfType<AiChatToolExecutionTimelineItemViewModel>()
+            .FirstOrDefault(item => item.ProposedActionId == proposedActionId);
+        if (invocation is null)
+        {
+            if (LatestRun?.IsTerminal == true)
+            {
+                returnToHomeLabActionId = null;
+            }
+
+            return;
+        }
+
+        if (invocation.Status != AiInvocationStatus.Succeeded)
+        {
+            if (invocation.Status is AiInvocationStatus.Failed or AiInvocationStatus.Cancelled)
+            {
+                returnToHomeLabActionId = null;
+            }
+
+            return;
+        }
+
+        if (LatestRun?.IsTerminal != true)
+        {
+            return;
+        }
+
+        returnToHomeLabActionId = null;
+        NavigationManager.NavigateTo("/home-lab/apps?tab=apps", replace: true);
+    }
+
+    private static bool IsHomeLabMutation(string toolName) =>
+        toolName.Equals(AiToolNames.ApplyHomeLabPromptRecipe, StringComparison.OrdinalIgnoreCase) ||
+        toolName.Equals(AiToolNames.RepairHomeLabApplicationConfig, StringComparison.OrdinalIgnoreCase) ||
+        toolName.Equals(AiToolNames.RepairHomeLabInstallation, StringComparison.OrdinalIgnoreCase);
+
+    private enum ThreadSidebarFilter
+    {
+        All = 0,
+        PendingApproval = 1,
+        NoServers = 2
+    }
+}

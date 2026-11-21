@@ -1,0 +1,3421 @@
+@* Copyright (c) 2026 LMS Developer. All rights reserved.
+   Applicable licence and release scope: see LICENSE.md for details. *@
+
+@page "/home-lab/apps"
+@rendermode InteractiveServer
+@implements IAsyncDisposable
+@using LinuxMadeSane.Application.Contracts.Ai
+@using LinuxMadeSane.Application.Contracts.EdgeGateway
+@using LinuxMadeSane.Application.Contracts.HomeLab
+@using LinuxMadeSane.Application.Interfaces
+@using LinuxMadeSane.Core.Enums
+@using LinuxMadeSane.Core.Models.HomeLab
+@using Microsoft.Extensions.DependencyInjection
+@using System.Net
+@using System.Net.NetworkInformation
+@using System.Net.Sockets
+@inject IHomeLabService HomeLabService
+@inject IEdgeGatewayService EdgeGatewayService
+@inject IHomeLabPromptRecipeProvider PromptRecipeProvider
+@inject IServiceScopeFactory ServiceScopeFactory
+@inject HomeLabTerminalTaskLauncher TerminalTaskLauncher
+@using System.Text.Json
+@inject NavigationManager Navigation
+@inject IJSRuntime JSRuntime
+
+<PageTitle>Home Lab | Linux Made Sane</PageTitle>
+
+<div class="page-shell home-lab-page">
+    <UiHeroPanel Title="Home Lab" Compact="true">
+        <Actions>
+            <UiCommandButton Label="@(backgroundRefreshInProgress ? "Refreshing..." : "Refresh")"
+                             Glyph="UiIconGlyph.Refresh"
+                             Variant="UiButtonVariant.Ghost"
+                             Disabled="@(busy || backgroundRefreshInProgress)"
+                             OnClick="RefreshAsync" />
+        </Actions>
+    </UiHeroPanel>
+
+    <aside class="home-lab-use-notice" aria-label="Home Lab recipe usage and responsibilities">
+        <p><strong>Home Lab recipes are intended for personal, non-commercial experimentation, not commercial or production deployments.</strong></p>
+        <p>Applications are installed only when you explicitly request deployment. They are independent third-party software, governed by their own licences and terms. You are responsible for checking those requirements and for their configuration, security, backups and ongoing operation.</p>
+        <p>Use these recipes at your own risk. Third-party application support is not included in LMS support unless expressly agreed.</p>
+    </aside>
+
+    @if (!string.IsNullOrWhiteSpace(message))
+    {
+        <p class="callout @(error ? "error" : "ready")">@message</p>
+    }
+
+    @if (workspace is null)
+    {
+        <UiPanel><p class="meta-text">Loading Home Lab...</p></UiPanel>
+    }
+    else
+    {
+        @if (renamingGateway is { } gatewayToRename)
+        {
+            <UiModal IsOpen="true"
+                     Title="Rename VPN gateway"
+                     Subtitle="This changes the name shown in Linux Made Sane. Docker networking and routed apps stay connected to the same gateway."
+                     Class="home-lab-rename-modal"
+                     OnClose="CancelGatewayRename">
+                <ChildContent>
+                    <section class="home-lab-rename-panel">
+                        <div class="home-lab-config-field">
+                            <label for="home-lab-gateway-name">Gateway name</label>
+                            <input id="home-lab-gateway-name"
+                                   class="ui-control-input"
+                                   maxlength="160"
+                                   value="@gatewayRenameValue"
+                                   @oninput="eventArgs => gatewayRenameValue = eventArgs.Value?.ToString() ?? string.Empty"
+                                   autofocus />
+                            <span class="meta-text">Currently shown as @gatewayToRename.DisplayName.</span>
+                        </div>
+                        <div class="home-lab-rename-actions">
+                            <UiCommandButton Label="Cancel"
+                                             Glyph="UiIconGlyph.Clear"
+                                             Variant="UiButtonVariant.Ghost"
+                                             Disabled="@busy"
+                                             OnClick="CancelGatewayRename" />
+                            <UiCommandButton Label="Rename gateway"
+                                             Glyph="UiIconGlyph.Edit"
+                                             Variant="UiButtonVariant.PrimaryMuted"
+                                             Disabled="@(busy || !CanRenameGateway)"
+                                             OnClick="RenameGatewayAsync" />
+                        </div>
+                    </section>
+                </ChildContent>
+            </UiModal>
+        }
+
+        @if (pendingRemoval is { } installationToRemove)
+        {
+            <UiModal IsOpen="true"
+                     Title="@($"Remove {installationToRemove.DisplayName}?")"
+                     Subtitle="The container and LMS access routes will be removed. App files, Docker volumes and shared media are retained. Data kept only inside the container itself will be lost."
+                     Class="home-lab-confirm-modal"
+                     OnClose="CancelRemoval">
+                <ChildContent>
+                    <section class="home-lab-confirm-panel">
+                        <p>This action stops and removes <strong>@installationToRemove.DisplayName</strong>.</p>
+                        <div class="home-lab-confirm-actions">
+                            <UiCommandButton Label="Cancel" Glyph="UiIconGlyph.Clear" Variant="UiButtonVariant.Ghost" Disabled="@busy" OnClick="CancelRemoval" />
+                            <UiCommandButton Label="Remove container" Glyph="UiIconGlyph.Delete" Variant="UiButtonVariant.Danger" Disabled="@busy" OnClick="ConfirmRemovalAsync" />
+                        </div>
+                    </section>
+                </ChildContent>
+            </UiModal>
+        }
+
+        @if (pendingGroupRemoval is { } groupToRemove)
+        {
+            <UiModal IsOpen="true"
+                     Title="@($"Delete {groupToRemove.Name}?")"
+                     Subtitle="This removes the group containers, routes, secrets and deployment network. Mounted app files and Docker volumes are retained. Unused app folders move to a recoverable holding area; protected mounts stay in place. Data kept only inside a container itself will be lost."
+                     Class="home-lab-confirm-modal"
+                     OnClose="CancelGroupRemoval">
+                <ChildContent>
+                    <section class="home-lab-confirm-panel">
+                        <p>This permanently removes <strong>@groupToRemove.Installations.Count containers</strong> from <strong>@groupToRemove.Name</strong>.</p>
+                        <div class="home-lab-confirm-actions">
+                            <UiCommandButton Label="Cancel" Glyph="UiIconGlyph.Clear" Variant="UiButtonVariant.Ghost" Disabled="@busy" OnClick="CancelGroupRemoval" />
+                            <UiCommandButton Label="Delete entire group" Glyph="UiIconGlyph.Delete" Variant="UiButtonVariant.Danger" Disabled="@busy" OnClick="ConfirmGroupRemovalAsync" />
+                        </div>
+                    </section>
+                </ChildContent>
+            </UiModal>
+        }
+
+        @if (appAddTargetGroup is { } addTargetGroup)
+        {
+            <UiModal IsOpen="true"
+                     Title="Add an app to this group"
+                     Subtitle="Install a new LMS-managed app and attach it to the existing recipe group. Existing containers are not recreated."
+                     Class="home-lab-confirm-modal"
+                     OnClose="CancelAddAppToGroup">
+                <ChildContent>
+                    <section class="home-lab-confirm-panel">
+                        <p>Add a service to <strong>@addTargetGroup.Name</strong>.</p>
+                        <label for="home-lab-add-group-app">App</label>
+                        <select id="home-lab-add-group-app"
+                                class="ui-control-input"
+                                value="@appAddSelection"
+                                @onchange="SelectAppToAddToGroup">
+                            <option value="">Choose an app...</option>
+                            @foreach (var app in AppsAvailableForGroup(addTargetGroup))
+                            {
+                                <option value="@app.Id">@app.Name</option>
+                            }
+                        </select>
+                        <div class="home-lab-confirm-actions">
+                            <UiCommandButton Label="Cancel" Glyph="UiIconGlyph.Clear" Variant="UiButtonVariant.Ghost" Disabled="@busy" OnClick="CancelAddAppToGroup" />
+                            <UiCommandButton Label="Configure app" Glyph="UiIconGlyph.Plus" Variant="UiButtonVariant.PrimaryMuted" Disabled="@(busy || string.IsNullOrWhiteSpace(appAddSelection))" OnClick="ConfigureAppForGroup" />
+                        </div>
+                    </section>
+                </ChildContent>
+            </UiModal>
+        }
+
+        <TabControl ActiveValue="@activeTab"
+                    ActiveValueChanged="HandleTabChangedAsync"
+                    Class="home-lab-tabs"
+                    PanelClass="home-lab-tab-panel">
+            <TabPage Value="apps" Title="Docker">
+                @if (configuringApp is { } appToConfigure)
+                {
+                    <UiModal IsOpen="true"
+                             Title="@(configuringInstallation is null ? $"Configure {appToConfigure.Name}" : $"Edit {configuringInstallation.DisplayName}")"
+                             Subtitle="Container settings are applied by LMS. Secrets are stored securely and are not shown again."
+                             Class="home-lab-settings-modal"
+                             CloseOnBackdrop="false"
+                             OnClose="CancelConfiguration">
+                        <ChildContent>
+                    <section class="home-lab-config-panel">
+                        <div class="home-lab-config-heading">
+                            <div>
+                                <p class="eyebrow">Installation settings</p>
+                                <h2>@(configuringInstallation is null ? $"Configure {appToConfigure.Name}" : $"Edit {configuringInstallation.DisplayName}")</h2>
+                                <p class="meta-text">These values are applied to the Docker container. Secret fields are stored by LMS and are not shown again.</p>
+                            </div>
+                            <UiCommandButton Label="Cancel" Glyph="UiIconGlyph.Clear" Variant="UiButtonVariant.Ghost" Disabled="@busy" OnClick="CancelConfiguration" />
+                        </div>
+                        <div class="home-lab-config-grid">
+                            @foreach (var field in appToConfigure.ConfigurationSchema.Where(ShouldShowConfigurationField))
+                            {
+                                <div class="@GetConfigurationFieldClass(field) @(IsVpnRoutingField(field) ? "home-lab-config-routing-field" : string.Empty)">
+                                    <label for="home-lab-@field.Id">@field.Label</label>
+                                    @if (field.Type.Equals("select", StringComparison.OrdinalIgnoreCase))
+                                    {
+                                        <select id="home-lab-@field.Id" class="ui-control-input" value="@GetConfigurationValue(field.Id)" @onchange="eventArgs => SetConfigurationValue(field.Id, eventArgs.Value?.ToString())">
+                                            <option value="">Choose...</option>
+                                            @if (field.Id.Equals("vpn-gateway", StringComparison.OrdinalIgnoreCase))
+                                            {
+                                                @foreach (var gateway in InstalledVpnGateways)
+                                                {
+                                                    <option value="@gateway.Id">@gateway.DisplayName (@gateway.HealthState)</option>
+                                                }
+                                            }
+                                            else
+                                            {
+                                                @foreach (var option in GetConfigurationFieldOptions(field))
+                                                {
+                                                    <option value="@option">@option</option>
+                                                }
+                                            }
+                                        </select>
+                                    }
+                                    else if (field.Type.Equals("secret-textarea", StringComparison.OrdinalIgnoreCase))
+                                    {
+                                        <textarea id="home-lab-@field.Id"
+                                                  class="ui-control-input ui-control-textarea"
+                                                  rows="8"
+                                                  autocomplete="off"
+                                                  @oninput="eventArgs => SetConfigurationValue(field.Id, eventArgs.Value?.ToString(), true)">@GetSecretConfigurationValue(field.Id)</textarea>
+                                    }
+                                    else
+                                    {
+                                        <input id="home-lab-@field.Id"
+                                               class="ui-control-input"
+                                               type="@(field.Secret ? "password" : "text")"
+                                               value="@(field.Secret ? GetSecretConfigurationValue(field.Id) : GetConfigurationValue(field.Id))"
+                                               autocomplete="@(field.Secret ? "new-password" : "off")"
+                                               @oninput="eventArgs => SetConfigurationValue(field.Id, eventArgs.Value?.ToString(), field.Secret)" />
+                                    }
+                                    @if (!string.IsNullOrWhiteSpace(field.Help))
+                                    {
+                                        <span class="meta-text">@GetConfigurationFieldHelp(field)</span>
+                                    }
+                                </div>
+                            }
+                        </div>
+                        <div class="home-lab-config-footer">
+                            <span class="meta-text">VPN routing and the kill switch are applied by the selected gateway.</span>
+                            <UiCommandButton Label="@(configuringInstallation is null ? "Install configured app" : "Save gateway")" Glyph="UiIconGlyph.Save" Variant="UiButtonVariant.Primary" Disabled="@busy" OnClick="InstallConfiguredAsync" />
+                        </div>
+                    </section>
+                        </ChildContent>
+                    </UiModal>
+                }
+
+                @if (selectedInstallation is not null && effectiveConfiguration is not null)
+                {
+                    var selectedDetails = effectiveConfiguration.Containers.FirstOrDefault(item => item.AppId.Equals(selectedInstallation.AppId, StringComparison.OrdinalIgnoreCase));
+                    if (selectedDetails is not null)
+                    {
+                        <UiModal IsOpen="true"
+                                 Title="@($"Settings · {selectedInstallation.DisplayName}")"
+                                 Subtitle="View and edit this LMS-managed Docker container. Secrets remain protected."
+                                 Class="home-lab-settings-modal"
+                                 CloseOnBackdrop="false"
+                                 OnClose="CloseDetails">
+                            <ChildContent>
+                                <section class="home-lab-details-panel">
+                                    <TabControl ActiveValue="@settingsTab"
+                                                ActiveValueChanged="HandleSettingsTabChangedAsync"
+                                                Class="home-lab-settings-tabs"
+                                                PanelClass="home-lab-settings-tab-panel">
+                                        <TabPage Value="overview" Title="Overview">
+                                            <div class="home-lab-settings-overview">
+                                                <div class="home-lab-detail-block">
+                                                    <h3>Health</h3>
+                                                    <dl class="home-lab-detail-list home-lab-detail-definition-list">
+                                                        <dt>Status</dt><dd><UiPill Tone="@GetHealthTone(selectedInstallation.HealthState)">@selectedInstallation.HealthState</UiPill></dd>
+                                                        <dt>Detail</dt><dd>@selectedInstallation.HealthDetail</dd>
+                                                        <dt>Container</dt><dd><code>@selectedDetails.ContainerName</code></dd>
+                                                        <dt>Definition</dt><dd><code>@GetApp(selectedDetails.AppId).DefinitionVersion</code></dd>
+                                                        <dt>Health check</dt><dd>@DescribeHealthCheck(GetApp(selectedDetails.AppId))</dd>
+                                                    </dl>
+                                                </div>
+                                                <div class="home-lab-detail-block">
+                                                    <h3>Access</h3>
+                                                    <ul class="home-lab-detail-list">
+                                                        @foreach (var item in selectedDetails.Access)
+                                                        {
+                                                            <li>@RenderAccessItem(item)</li>
+                                                        }
+                                                    </ul>
+                                                    <label class="meta-text" for="home-lab-browser-entry">Open link path or URL</label>
+                                                    <div class="d-flex gap-2 align-items-center">
+                                                        <input id="home-lab-browser-entry" class="form-control form-control-sm" @bind="browserEntryDraft" placeholder="Configured path or URL" />
+                                                        <UiCommandButton Label="Save" Glyph="UiIconGlyph.Save" Variant="UiButtonVariant.ActionSubtle"
+                                                                         Disabled="@(busy || !HomeLabBrowserUrl.IsValid(browserEntryDraft))" OnClick="SaveBrowserEntryAsync" />
+                                                    </div>
+                                                    <span class="meta-text">Uses deployment metadata or the documented recipe setting. Saving changes only the Open link.</span>
+
+                                                </div>
+                                                <div class="home-lab-detail-block">
+                                                    <h3>Files</h3>
+                                                    <p class="meta-text">Configuration and shared data are grouped under this container's named folder.</p>
+                                                    <code>@GetContainerFilesPath(selectedInstallation)</code>
+                                                    <UiCommandButton Label="Browse files"
+                                                                     Glyph="UiIconGlyph.FolderOpen"
+                                                                     Variant="UiButtonVariant.ActionSubtle"
+                                                                     Href="@BuildHomeLabFilesUrl(selectedInstallation)"
+                                                                     Target="@BuildHomeLabFilesPopupName(selectedInstallation)"
+                                                                     Rel="noopener"
+                                                                     OnClientPointerDown="@BuildHomeLabFilesPopupPrepareScript(selectedInstallation)"
+                                                                     OnClientClick="@BuildHomeLabFilesPopupOpenScript()" />
+                                                </div>
+                                                <div class="home-lab-detail-block">
+                                                    <h3>Dependencies</h3>
+                                                    @if (selectedDetails.Dependencies.Count == 0)
+                                                    {
+                                                        <p class="meta-text">None.</p>
+                                                    }
+                                                    else
+                                                    {
+                                                        <ul class="home-lab-detail-list">
+                                                            @foreach (var dependency in selectedDetails.Dependencies)
+                                                            {
+                                                                <li>@GetApp(dependency).Name</li>
+                                                            }
+                                                        </ul>
+                                                    }
+                                                </div>
+                                            </div>
+                                            <div class="home-lab-setting-card home-lab-overview-logs">
+                                                <div class="home-lab-logs-heading">
+                                                    <div>
+                                                        <h3>Latest container logs</h3>
+                                                        <p class="meta-text">Shown automatically when this window opens. Use Logs for the full view.</p>
+                                                    </div>
+                                                    <UiCommandButton Label="Refresh logs" Glyph="UiIconGlyph.Terminal" Variant="UiButtonVariant.ActionSubtle" Disabled="@busy" OnClick="LoadSelectedLogsAsync" />
+                                                </div>
+                                                @if (selectedLogs is null)
+                                                {
+                                                    <p class="meta-text">Loading the latest output...</p>
+                                                }
+                                                else
+                                                {
+                                                    <pre class="home-lab-detail-code home-lab-logs home-lab-overview-logs-output">@selectedLogs</pre>
+                                                }
+                                            </div>
+                                        </TabPage>
+
+                                        @if (!IsVpnGateway(selectedInstallation))
+                                        {
+                                        <TabPage Value="connections" Title="Connections">
+                                            <div class="home-lab-settings-stack">
+                                                <div class="home-lab-connection-intro">
+                                                    <strong>Addresses to use inside @selectedInstallation.DisplayName</strong>
+                                                    <span>Copy these values into this app when it asks for another LMS-managed service. Do not use a Docker IP or the browser Open address; Docker IPs change and browser routes are intended for people.</span>
+                                                </div>
+                                                @if (connectionGuide is null)
+                                                {
+                                                    <p class="meta-text">Loading connection addresses...</p>
+                                                }
+                                                else if (connectionGuide.Addresses.Count == 0)
+                                                {
+                                                    <div class="home-lab-setting-card">
+                                                        <strong>No connected app endpoints were found.</strong>
+                                                        <span class="meta-text">Run related apps from one recipe or route them through the same VPN Gateway so LMS can provide a stable internal address.</span>
+                                                    </div>
+                                                }
+                                                else
+                                                {
+                                                    @foreach (var connection in connectionGuide.Addresses)
+                                                    {
+                                                        <div class="home-lab-connection-card">
+                                                            <div class="home-lab-connection-heading">
+                                                                <div>
+                                                                    <strong>@connection.TargetName</strong>
+                                                                    <span>@connection.Purpose</span>
+                                                                </div>
+                                                                <UiPill Tone="@(connection.IsReachable ? UiPillTone.Success : UiPillTone.Warning)">@(connection.IsReachable ? "Ready" : "Network change needed")</UiPill>
+                                                            </div>
+                                                            @if (connection.IsReachable)
+                                                            {
+                                                                <div class="home-lab-connection-value">
+                                                                    <code>@connection.Url</code>
+                                                                    <UiCommandButton Label="Copy address"
+                                                                                     Glyph="UiIconGlyph.Copy"
+                                                                                     Variant="UiButtonVariant.ActionSubtle"
+                                                                                     OnClick="() => CopyConnectionAddressAsync(connection)" />
+                                                                </div>
+                                                            }
+                                                            <dl class="home-lab-detail-list home-lab-detail-definition-list home-lab-connection-details">
+                                                                @if (connection.IsReachable)
+                                                                {
+                                                                    <dt>Host</dt><dd><code>@connection.Host</code></dd>
+                                                                    <dt>Port</dt><dd><code>@connection.Port</code></dd>
+                                                                }
+                                                                <dt>Network path</dt><dd>@connection.NetworkPath</dd>
+                                                                <dt>Extra port mapping</dt><dd>@connection.PortMapping</dd>
+                                                            </dl>
+                                                            <p class="meta-text">@connection.Detail</p>
+                                                        </div>
+                                                    }
+                                                }
+                                                <p class="meta-text">The address establishes the network connection. If the target app requires an API key or login, obtain that value from the target app itself.</p>
+                                            </div>
+                                        </TabPage>
+                                        }
+
+                                        @if (!selectedInstallation.IsExternallyManaged)
+                                        {
+                                        <TabPage Value="network" Title="Network &amp; VPN">
+                                            <div class="home-lab-settings-stack">
+                                                <div class="home-lab-setting-card">
+                                                    <div class="home-lab-details-heading">
+                                                        <div>
+                                                            <h3>Network and VPN status</h3>
+                                                            <p class="meta-text">Route, gateway, security, and port forwarding for this container.</p>
+                                                        </div>
+                                                        <UiPill Tone="@GetCompactNetworkTone(selectedInstallation)">@GetCompactNetworkState(selectedInstallation)</UiPill>
+                                                    </div>
+                                                    @if (networkSecurity is { } security)
+                                                    {
+                                                        <dl class="home-lab-detail-list home-lab-detail-definition-list">
+                                                            <dt>Route</dt><dd>@GetNetworkRouteLabel(selectedInstallation)</dd>
+                                                            <dt>Public IP</dt><dd><code>@(security.PublicIp ?? "Unavailable")</code></dd>
+                                                            <dt>Gateway health</dt><dd>@security.GatewayHealth</dd>
+                                                            @if (selectedDetails.AppId.Equals("qbittorrent", StringComparison.OrdinalIgnoreCase))
+                                                            {
+                                                                <dt>Incoming peer port</dt><dd>@(security.PortForwardingStatus ?? "Unverified")@(security.ForwardedPort is int forwardedPort ? $" · {forwardedPort}" : string.Empty)</dd>
+                                                            }
+                                                            <dt>Checked</dt><dd>@security.CheckedAtUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss")</dd>
+                                                        </dl>
+                                                    }
+                                                    <UiCommandButton Label="Check network now"
+                                                                     Glyph="UiIconGlyph.Refresh"
+                                                                     Variant="UiButtonVariant.ActionSubtle"
+                                                                     Disabled="@busy"
+                                                                     OnClick="VerifySecurityAsync" />
+                                                    @if (IsVpnGateway(selectedInstallation))
+                                                    {
+                                                        <div class="home-lab-network-gateway-details">
+                                                        <h3>VPN gateway</h3>
+                                                        <dl class="home-lab-detail-list home-lab-detail-definition-list">
+                                                            <dt>Name</dt><dd>@selectedInstallation.DisplayName</dd>
+                                                            <dt>Provider</dt><dd>@FormatProvider(GetEffectiveEnvironmentValue(selectedDetails, "VPN_SERVICE_PROVIDER"))</dd>
+                                                            <dt>Protocol</dt><dd>@FormatProtocol(GetEffectiveEnvironmentValue(selectedDetails, "VPN_TYPE"))</dd>
+                                                        </dl>
+                                                        <div class="home-lab-action-row">
+                                                            <UiCommandButton Label="Edit VPN settings" Glyph="UiIconGlyph.Edit" Variant="UiButtonVariant.ActionSubtle" Disabled="@busy" OnClick="BeginVpnReconfiguration" />
+                                                            <UiCommandButton Label="Rename gateway" Glyph="UiIconGlyph.Edit" Variant="UiButtonVariant.Ghost" Disabled="@busy" OnClick="() => BeginGatewayRename(selectedInstallation)" />
+                                                        </div>
+                                                        </div>
+                                                    }
+                                                </div>
+                                            </div>
+                                        </TabPage>
+
+                                        <TabPage Value="external" Title="External access">
+                                            <div class="home-lab-settings-stack">
+                                                @if (!GetApp(selectedInstallation.AppId).EdgeGatewaySupported)
+                                                {
+                                                    <div class="home-lab-setting-card">
+                                                        <h3>@(selectedInstallation.AppId.Equals("squid-proxy", StringComparison.OrdinalIgnoreCase) ? "External access deliberately unavailable" : "External access unavailable")</h3>
+                                                        <p class="meta-text">@(selectedInstallation.AppId.Equals("squid-proxy", StringComparison.OrdinalIgnoreCase)
+                                                            ? "Squid is a forward proxy and is intentionally LAN-only. Use its LAN endpoint in the proxy settings on devices you control. Publishing it publicly would create an open proxy."
+                                                            : "This service cannot be published through LMS Edge Gateway.")</p>
+                                                    </div>
+                                                }
+                                                else
+                                                {
+                                                    var externalRoute = GetExternalRoute(selectedInstallation);
+                                                    var publicEndpoint = selectedInstallation.ServiceEndpoints?.FirstOrDefault(endpoint => endpoint.Scope == HomeLabEndpointScope.Public);
+                                                    <div class="home-lab-setting-card">
+                                                        <div class="home-lab-details-heading">
+                                                            <div>
+                                                                <h3>Edge Gateway publishing</h3>
+                                                                <p class="meta-text">Choose whether this Home Lab service is reachable externally and how Edge Gateway protects it.</p>
+                                                            </div>
+                                                            <UiPill Tone="@(externalRoute is { Enabled: true } ? UiPillTone.Success : UiPillTone.Neutral)">@(externalRoute is { Enabled: true } ? "Published" : "Local only")</UiPill>
+                                                        </div>
+
+                                                        @if (externalRoute is { Enabled: true } && publicEndpoint is not null)
+                                                        {
+                                                            <dl class="home-lab-detail-list home-lab-detail-definition-list">
+                                                                <dt>External URL</dt><dd><a href="@publicEndpoint.Url" target="_blank" rel="noopener">@publicEndpoint.Url</a></dd>
+                                                                <dt>Protection</dt><dd>@FormatExternalAuthMode(externalRoute.AuthMode)</dd>
+                                                                <dt>Endpoint health</dt><dd>@publicEndpoint.HealthState — @publicEndpoint.HealthDetail</dd>
+                                                            </dl>
+                                                            <UiCommandButton Label="Test endpoint"
+                                                                             Glyph="UiIconGlyph.Refresh"
+                                                                             Variant="UiButtonVariant.ActionSubtle"
+                                                                             Disabled="@busy"
+                                                                             OnClick="TestSelectedEndpointAsync" />
+                                                        }
+
+                                                        @if (externalAccessLoading)
+                                                        {
+                                                            <p class="meta-text">Loading Edge Gateway publishing options...</p>
+                                                        }
+                                                        else if (AvailableExternalDomains.Count == 0)
+                                                        {
+                                                            <p class="meta-text">Set up a Cloudflare domain and relay in Edge Gateway before publishing this service.</p>
+                                                            <UiCommandButton Label="Open Edge Gateway"
+                                                                             Glyph="UiIconGlyph.Website"
+                                                                             Variant="UiButtonVariant.ActionSubtle"
+                                                                             Href="/edge-gateway" />
+                                                        }
+                                                        else
+                                                        {
+                                                            <div class="home-lab-config-grid">
+                                                                <div class="home-lab-config-field">
+                                                                    <label for="home-lab-external-hostname">External hostname</label>
+                                                                    <input id="home-lab-external-hostname"
+                                                                           class="ui-control-input"
+                                                                           value="@externalHostnameDraft"
+                                                                           disabled="@(externalRoute is { Enabled: true })"
+                                                                           @oninput="eventArgs => externalHostnameDraft = eventArgs.Value?.ToString() ?? string.Empty" />
+                                                                    <span class="meta-text">@(externalRoute is { Enabled: true } ? "Remove external access before changing the hostname." : "Use a new hostname inside the selected Cloudflare zone.")</span>
+                                                                </div>
+                                                                <div class="home-lab-config-field">
+                                                                    <label for="home-lab-external-domain">Cloudflare zone</label>
+                                                                    <select id="home-lab-external-domain"
+                                                                            class="ui-control-input"
+                                                                            value="@externalDomainDraft"
+                                                                            disabled="@(externalRoute is { Enabled: true })"
+                                                                            @onchange="ChangeExternalDomain">
+                                                                        @foreach (var domain in AvailableExternalDomains)
+                                                                        {
+                                                                            <option value="@domain.DomainName">@domain.DomainName</option>
+                                                                        }
+                                                                    </select>
+                                                                </div>
+                                                                <div class="home-lab-config-field">
+                                                                    <label for="home-lab-external-auth">Protection</label>
+                                                                    <select id="home-lab-external-auth"
+                                                                            class="ui-control-input"
+                                                                            value="@externalAuthModeDraft"
+                                                                            @onchange="ChangeExternalAuthMode">
+                                                                        <option value="@EdgeGatewayAuthMode.RequireMfa">LMS MFA / passkey</option>
+                                                                        <option value="@EdgeGatewayAuthMode.TemporaryIpApproval">Email approve IP</option>
+                                                                        <option value="@EdgeGatewayAuthMode.PassThrough">Pass through to app</option>
+                                                                    </select>
+                                                                    <span class="meta-text">Use pass-through only when the app must handle native clients or provides its own suitable login.</span>
+                                                                </div>
+                                                            </div>
+                                                            <div class="home-lab-setting-card">
+                                                                <strong>Public address</strong>
+                                                                <code>@BuildExternalPreview()</code>
+                                                                @if (selectedInstallation.IsRecipeInstallation)
+                                                                {
+                                                                    <p class="meta-text">LMS keeps the local Docker URL private. This service has its own public hostname.</p>
+                                                                }
+                                                            </div>
+                                                            <div class="home-lab-action-row">
+                                                                <UiCommandButton Label="@(externalRoute is null ? "Publish externally" : "Save external access")"
+                                                                                 Glyph="UiIconGlyph.Website"
+                                                                                 Variant="UiButtonVariant.Primary"
+                                                                                 Disabled="@(busy || !CanSaveExternalAccess)"
+                                                                                 OnClick="SaveExternalAccessAsync" />
+                                                                @if (selectedInstallation.EdgeGatewayRouteId.HasValue)
+                                                                {
+                                                                    <UiCommandButton Label="Remove external access"
+                                                                                     Glyph="UiIconGlyph.Delete"
+                                                                                     Variant="UiButtonVariant.Danger"
+                                                                                     Disabled="@busy"
+                                                                                     OnClick="RequestExternalUnpublish" />
+                                                                }
+                                                            </div>
+                                                        }
+                                                    </div>
+
+                                                    @if (confirmExternalUnpublish)
+                                                    {
+                                                        <div class="home-lab-setting-card">
+                                                            <strong>Remove external access?</strong>
+                                                            <p class="meta-text">LMS will remove the app's managed DNS record, tunnel ingress, and Edge Gateway route. Local access remains available.</p>
+                                                            <div class="home-lab-action-row">
+                                                                <UiCommandButton Label="Cancel" Glyph="UiIconGlyph.Clear" Variant="UiButtonVariant.Ghost" Disabled="@busy" OnClick="CancelExternalUnpublish" />
+                                                                <UiCommandButton Label="Remove external access" Glyph="UiIconGlyph.Delete" Variant="UiButtonVariant.Danger" Disabled="@busy" OnClick="UnpublishExternalAccessAsync" />
+                                                            </div>
+                                                        </div>
+                                                    }
+                                                }
+                                            </div>
+                                        </TabPage>
+
+                                        }
+
+                                        <TabPage Value="container" Title="Container">
+                                            <div class="home-lab-container-editor">
+                                                @if (selectedInstallation.IsExternallyManaged)
+                                                {
+                                                    <p class="meta-text">Docker manager owns this container. These LMS-saved settings are for reference; edit and redeploy it in your Docker manager.</p>
+                                                }
+                                                <div class="home-lab-config-field">
+                                                    <label for="home-lab-container-image">Docker image</label>
+                                                    <input id="home-lab-container-image" class="ui-control-input" readonly="@selectedInstallation.IsExternallyManaged" @bind="containerImageDraft" @bind:event="oninput" />
+                                                </div>
+                                                <div class="home-lab-config-field">
+                                                    <label for="home-lab-container-environment">Environment</label>
+                                                    <textarea id="home-lab-container-environment" class="ui-control-textarea home-lab-code-editor" readonly="@selectedInstallation.IsExternallyManaged" @bind="containerEnvironmentDraft" @bind:event="oninput"></textarea>
+                                                    <span class="meta-text">One KEY=value entry per line. Protected secrets and LMS-managed routing values are excluded.</span>
+                                                </div>
+                                                <div class="home-lab-config-field">
+                                                    <label for="home-lab-container-volumes">Volume mappings</label>
+                                                    <textarea id="home-lab-container-volumes" class="ui-control-textarea home-lab-code-editor" readonly="@selectedInstallation.IsExternallyManaged" @bind="containerVolumesDraft" @bind:event="oninput"></textarea>
+                                                    <span class="meta-text">One absolute host:container mapping per line. Add :ro for read-only mounts.</span>
+                                                </div>
+                                                <div class="home-lab-setting-card">
+                                                    <h3>Published ports</h3>
+                                                    <code>@(selectedDetails.Ports.Count == 0 ? "None" : string.Join(Environment.NewLine, selectedDetails.Ports))</code>
+                                                    <p class="meta-text">@(selectedInstallation.IsExternallyManaged ? "Manage published ports in your Docker manager." : "LMS manages published ports and checks every shared VPN namespace for collisions.")</p>
+                                                </div>
+                                                @if (!selectedInstallation.IsExternallyManaged)
+                                                {
+                                                <div class="home-lab-config-footer">
+                                                    <span class="meta-text">Saving recreates the container with these values. Use Terminal AI if an edited container does not start.</span>
+                                                    <div class="home-lab-action-row">
+                                                        @if (selectedDetails.HasCustomSettings)
+                                                        {
+                                                            <UiCommandButton Label="Restore pre-edit settings" Glyph="UiIconGlyph.Repair" Variant="UiButtonVariant.ActionSubtle" Disabled="@busy" OnClick="RestoreContainerSettingsAsync" />
+                                                        }
+                                                        <UiCommandButton Label="Reset edits" Glyph="UiIconGlyph.Refresh" Variant="UiButtonVariant.Ghost" Disabled="@busy" OnClick="ResetContainerSettingsDraft" />
+                                                        <UiCommandButton Label="Save and recreate" Glyph="UiIconGlyph.Save" Variant="UiButtonVariant.Primary" Disabled="@busy" OnClick="SaveContainerSettingsAsync" />
+                                                    </div>
+                                                </div>
+                                                }
+                                            </div>
+                                        </TabPage>
+
+                                        <TabPage Value="advanced" Title="Advanced Settings">
+                                            <div class="home-lab-container-editor">
+                                                <div class="home-lab-setting-card">
+                                                    <strong>Owner: @(selectedInstallation.IsExternallyManaged ? "Docker manager" : "LMS")</strong>
+                                                    <p class="meta-text">@(selectedInstallation.IsExternallyManaged
+                                                        ? "LMS only observes this container. Manage its lifecycle and configuration in your Docker manager."
+                                                        : "LMS currently creates and updates this container. Handing it off leaves it running and permanently stops LMS lifecycle changes for it.")</p>
+                                                </div>
+                                                <div class="home-lab-config-field">
+                                                    <label for="home-lab-compose-yaml">Full Compose file</label>
+                                                    <textarea id="home-lab-compose-yaml"
+                                                              class="ui-control-textarea home-lab-code-editor home-lab-compose-editor"
+                                                              spellcheck="false"
+                                                              @bind="composeYamlDraft" @bind:event="oninput"></textarea>
+                                                    <span class="meta-text">This is an editable export of the container's saved Docker settings. Protected values use placeholders. Saving the file does not deploy it. Before deploying the Compose stack, stop and remove the old standalone container in your Docker manager; keep its host-mounted data.</span>
+                                                </div>
+                                                <div class="home-lab-action-row">
+                                                    <UiCommandButton Label="Save Compose file" Glyph="UiIconGlyph.Save" Variant="UiButtonVariant.ActionSubtle" Disabled="@busy" OnClick="SaveComposeDraftAsync" />
+                                                    <a class="ui-button" download="compose.yaml" href="@($"data:text/yaml;charset=utf-8,{Uri.EscapeDataString(composeYamlDraft)}")">Download compose.yaml</a>
+                                                    @if (!selectedInstallation.IsExternallyManaged)
+                                                    {
+                                                        <UiCommandButton Label="Hand off to Docker manager" Glyph="UiIconGlyph.PopOut" Variant="UiButtonVariant.PrimaryMuted" Disabled="@busy" OnClick="() => confirmDockerHandoff = true" />
+                                                    }
+                                                </div>
+                                                @if (confirmDockerHandoff && !selectedInstallation.IsExternallyManaged)
+                                                {
+                                                    <div class="home-lab-setting-card">
+                                                        <strong>Hand off this container?</strong>
+                                                        <p class="meta-text">The container keeps running. LMS will stop starting, stopping, repairing, updating, removing, and recreating it. Import the Compose file into your Docker manager when you want to redeploy it. For VPN-routed apps, preserve the gateway network mode in that manager.</p>
+                                                        <div class="home-lab-action-row">
+                                                            <UiCommandButton Label="Cancel" Glyph="UiIconGlyph.Clear" Variant="UiButtonVariant.Ghost" OnClick="() => confirmDockerHandoff = false" />
+                                                            <UiCommandButton Label="Confirm handoff" Glyph="UiIconGlyph.PopOut" Variant="UiButtonVariant.Primary" Disabled="@busy" OnClick="HandOffToDockerManagerAsync" />
+                                                        </div>
+                                                    </div>
+                                                }
+                                            </div>
+                                        </TabPage>
+
+                                        <TabPage Value="logs" Title="Logs">
+                                            <div class="home-lab-settings-stack home-lab-logs-tab-content">
+                                                @if (selectedDetails.AppId.Equals("qbittorrent", StringComparison.OrdinalIgnoreCase))
+                                                {
+                                                    <div class="home-lab-setting-card">
+                                                        <h3>qBittorrent direct login</h3>
+                                                        <p class="meta-text">Username: <code>admin</code>. The LMS Open link uses the trusted local route.</p>
+                                                        @if (TryGetTemporaryPassword() is { } temporaryPassword)
+                                                        {
+                                                            <label class="home-lab-password-label" for="qbittorrent-temporary-password">Current temporary password</label>
+                                                            <input id="qbittorrent-temporary-password" class="ui-control-input home-lab-password-field" value="@temporaryPassword" readonly />
+                                                        }
+                                                        @if (!selectedInstallation.IsExternallyManaged)
+                                                        {
+                                                            <UiCommandButton Label="Reset to temporary password" Glyph="UiIconGlyph.Restart" Variant="UiButtonVariant.ActionSubtle" Disabled="@busy" OnClick="ResetSelectedCredentialsAsync" />
+                                                        }
+                                                    </div>
+                                                }
+                                                <div class="home-lab-setting-card home-lab-logs-card">
+                                                    <div class="home-lab-logs-heading">
+                                                        <div>
+                                                            <h3>Container logs</h3>
+                                                            <p class="meta-text">Startup, health, and application output.</p>
+                                                        </div>
+                                                        <UiCommandButton Label="Refresh logs" Glyph="UiIconGlyph.Terminal" Variant="UiButtonVariant.Ghost" Disabled="@busy" OnClick="LoadSelectedLogsAsync" />
+                                                    </div>
+                                                    @if (selectedLogs is null)
+                                                    {
+                                                        <p class="meta-text">Loading the latest output...</p>
+                                                    }
+                                                    else
+                                                    {
+                                                        <pre class="home-lab-detail-code home-lab-logs">@selectedLogs</pre>
+                                                    }
+                                                </div>
+                                            </div>
+                                        </TabPage>
+                                    </TabControl>
+                                </section>
+                            </ChildContent>
+                        </UiModal>
+                    }
+                }
+
+                <section class="surface-subcard home-lab-docker-heading">
+                    <div>
+                        <p class="eyebrow">@(IsDockerManagerMode ? "Docker manager ownership" : "Managed Docker")</p>
+                        <h2>Installed containers</h2>
+                        <p class="meta-text">@(IsDockerManagerMode ? "Your Docker manager owns every HomeLab container. LMS shows status and saved settings but no longer installs or changes containers." : "Use Terminal AI on a container to inspect its health, LMS Caddy route, dependencies, and Docker networking, then approve a repair if one is needed.")</p>
+                    </div>
+                    @if (!IsDockerManagerMode)
+                    {
+                    <UiCommandButton Label="Add VPN Gateway"
+                                     Title="Install another independently configured VPN gateway"
+                                     Glyph="UiIconGlyph.Plus"
+                                     Variant="UiButtonVariant.PrimaryMuted"
+                                     Disabled="@busy"
+                                     OnClick='() => InstallAsync(GetApp("vpn-gateway"))' />
+                    }
+                </section>
+
+                <div class="surface-card home-lab-app-list">
+                    <div class="home-lab-app-list-header">
+                        <span>Container</span>
+                        <span>VPN</span>
+                        <span>Status</span>
+                        <span>Actions</span>
+                    </div>
+                    @if (workspace.Installations.Count == 0)
+                    {
+                        <div class="home-lab-empty-state">
+                            <strong>No Docker containers have been set up yet.</strong>
+                            <span>Use a HomeLab Recipe, enter your own request, or add a VPN Gateway.</span>
+                        </div>
+                    }
+                    @foreach (var group in BuildInstallationGroups())
+                    {
+                        var expanded = !collapsedInstallationGroups.Contains(group.Key);
+                        var hasRepairCandidates = GroupRepairCandidates(group).Count > 0;
+                        <div class="home-lab-installation-group-heading">
+                            <button type="button"
+                                    class="home-lab-installation-group-toggle-button"
+                                    aria-expanded="@expanded"
+                                    aria-controls="@($"home-lab-installation-group-{group.Key}")"
+                                    @onclick="() => ToggleInstallationGroup(group.Key)">
+                                <span class="home-lab-installation-group-toggle" aria-hidden="true">@(expanded ? "−" : "+")</span>
+                                <span class="home-lab-installation-group-name">
+                                    <strong>@group.Name</strong>
+                                    <span>@group.Detail</span>
+                                </span>
+                                <span class="home-lab-installation-group-count">@FormatContainerCount(group.Installations.Count)</span>
+                            </button>
+                            @if (hasRepairCandidates || group.Installations.Count > 0)
+                            {
+                                <div class="home-lab-installation-group-actions">
+                                    @if (!IsDockerManagerMode && group.Installations.All(item => !item.IsExternallyManaged))
+                                    {
+                                        <div class="home-lab-group-startup">
+                                            <UiSelectField TValue="string" Label="Start on boot" aria-label="@($"Start on boot for {group.Name}")" Compact="true" Inline="true" Value="@GroupStartupValue(group)" ValueChanged="value => SetGroupStartupAsync(group, value)" Disabled="@busy">
+                                                <option value="mixed" selected="@(GroupStartupValue(group) == "mixed")" disabled>Mixed</option><option value="unless-stopped" selected="@(GroupStartupValue(group) == "unless-stopped")" disabled>On unless stopped</option><option value="on" selected="@(GroupStartupValue(group) == "on")">On</option><option value="off" selected="@(GroupStartupValue(group) == "off")">Off</option>
+                                            </UiSelectField>
+                                        </div>
+                                        <UiCommandButton Label="Start group" Glyph="UiIconGlyph.Run" Variant="UiButtonVariant.ActionSubtle" Disabled="@busy" OnClick="() => RunGroupAsync(group, HomeLabLifecycleAction.Start)" />
+                                        <UiCommandButton Label="Stop group" Glyph="UiIconGlyph.Stop" Variant="UiButtonVariant.ActionSubtle" Disabled="@busy" OnClick="() => RunGroupAsync(group, HomeLabLifecycleAction.Stop)" />
+                                        <UiCommandButton Label="Restart group" Glyph="UiIconGlyph.Restart" Variant="UiButtonVariant.ActionSubtle" Disabled="@busy" OnClick="() => RunGroupAsync(group, HomeLabLifecycleAction.Restart)" />
+                                    }
+                                    @if (group.RecipeRunId.HasValue && !IsDockerManagerMode)
+                                    {
+                                        <UiCommandButton Label="Add app"
+                                                         Title="Add another app to this existing recipe group"
+                                                         Glyph="UiIconGlyph.Plus"
+                                                         Variant="UiButtonVariant.ActionSubtle"
+                                                         Disabled="@busy"
+                                                         OnClick="() => BeginAddAppToGroup(group)" />
+                                    }
+                                    <UiCommandButton Label="Delete group"
+                                                     Title="Remove group containers and routes; retain mounted files and Docker volumes"
+                                                     Glyph="UiIconGlyph.Delete"
+                                                     Variant="UiButtonVariant.Danger"
+                                                     Disabled="@(busy || group.Installations.Any(item => item.IsExternallyManaged))"
+                                                     OnClick="() => BeginGroupRemoval(group)" />
+                                    @if (hasRepairCandidates)
+                                    {
+                                    <UiCommandButton Label="Repair group"
+                                                     Title="Repair every degraded, failed, or blocked installation in this group"
+                                                     Glyph="UiIconGlyph.Refresh"
+                                                     Variant="UiButtonVariant.ActionSubtle"
+                                                     Disabled="@busy"
+                                                     OnClick="() => RepairGroupAsync(group)" />
+                                    <UiCommandButton Label="Repair with terminal AI"
+                                                     Title="Open one AI troubleshooting conversation for the whole group"
+                                                     Glyph="UiIconGlyph.Ai"
+                                                     Variant="UiButtonVariant.PrimaryMuted"
+                                                     Disabled="@(busy || startingPromptRecipeId is not null)"
+                                                     OnClick="() => StartGroupRepairHelpAsync(group)" />
+                                    }
+                                </div>
+                            }
+                        </div>
+                        @if (expanded)
+                        {
+                            <div id="@($"home-lab-installation-group-{group.Key}")" class="home-lab-installation-group-rows">
+                            @foreach (var installation in group.Installations)
+                            {
+                                var app = GetApp(installation.AppId);
+                                <div class="home-lab-app-row" @key="installation.Id">
+                                    <div class="home-lab-app-name">
+                                        <strong>@installation.DisplayName</strong>
+                                        <span>@app.Description</span>
+                                    </div>
+                                    <div class="home-lab-network-compact">
+                                        @if (app.SupportsVpnGateway)
+                                        {
+                                            <HomeLabRouteSelector @key="installation.Id"
+                                                                  NetworkMode="@installation.NetworkMode"
+                                                                  DisplayName="@installation.DisplayName"
+                                                                  Gateways="@InstalledVpnGateways"
+                                                                  RequiresVpnGateway="@app.RequiresVpnGateway"
+                                                                  Busy="@busy"
+                                                                  ValueChanged="selection => ChangeSummaryRouteAsync(installation, selection)" />
+                                            <UiPill Tone="@GetCompactNetworkTone(installation)">@GetCompactNetworkState(installation)</UiPill>
+                                        }
+                                        else if (IsVpnGateway(installation))
+                                        {
+                                            <UiPill Tone="@GetCompactNetworkTone(installation)">VPN Gateway</UiPill>
+                                        }
+                                        else
+                                        {
+                                            <UiPill Tone="@UiPillTone.Neutral">Direct</UiPill>
+                                        }
+                                    </div>
+                                    <UiPill Tone="@GetHealthTone(installation.HealthState)">@installation.HealthState</UiPill>
+                                    <div class="home-lab-row-actions">
+                                        @if (BuildOpenUrl(installation) is { } openUrl)
+                                        {
+                                            <UiCommandButton Label="Open"
+                                                             Glyph="UiIconGlyph.Website"
+                                                             Variant="UiButtonVariant.Action"
+                                                             Href="@openUrl"
+                                                             Target="_blank"
+                                                             Rel="noopener"
+                                                             referrerpolicy="@(installation.AppId.Equals("qbittorrent", StringComparison.OrdinalIgnoreCase) ? "no-referrer" : null)" />
+                                        }
+                                        <UiCommandButton Label="Terminal AI"
+                                                         Title="Open a troubleshooting chat for this Docker container"
+                                                         Glyph="UiIconGlyph.Ai"
+                                                         Variant="UiButtonVariant.PrimaryMuted"
+                                                         Disabled="@(busy || startingPromptRecipeId is not null)"
+                                                         OnClick="() => StartContainerHelpAsync(installation)" />
+                                        <UiCommandButton Label="Settings"
+                                                         Glyph="UiIconGlyph.Edit"
+                                                         Variant="UiButtonVariant.Ghost"
+                                                         Disabled="@busy"
+                                                         OnClick="() => ManageAsync(installation)" />
+                                        @if (installation.IsExternallyManaged)
+                                        {
+                                            <UiPill Tone="@UiPillTone.Neutral">Docker manager</UiPill>
+                                        }
+                                        else
+                                        {
+                                        <select class="ui-control-input home-lab-action-select"
+                                                @key="(installation.Id, actionSelectionRevision)"
+                                                aria-label="Actions for @installation.DisplayName"
+                                                value=""
+                                                disabled="@busy"
+                                                @onchange="eventArgs => HandleContainerActionAsync(installation, eventArgs.Value?.ToString())">
+                                            <option value="">Actions...</option>
+                                            <option value="start">Start</option>
+                                            <option value="stop">Stop</option>
+                                            <option value="restart">Restart</option>
+                                            @if (CanRepair(installation))
+                                            {
+                                                <option value="repair">Repair</option>
+                                            }
+                                            <option value="update">Update</option>
+                                            @if (IsVpnGateway(installation))
+                                            {
+                                                <option value="rename">Rename</option>
+                                                <option value="vpn-settings">VPN settings</option>
+                                            }
+                                            <option value="remove">Remove...</option>
+                                        </select>
+                                        }
+                                    </div>
+                                </div>
+                            }
+                            </div>
+                        }
+                    }
+                </div>
+                <section class="surface-subcard home-lab-docker-managers">
+                    <h2>Choose a Docker manager</h2>
+                    <p>Portainer, Arcane, Dockhand and Dockge have installable recipes. Once one is healthy, LMS hands over every HomeLab container, including the manager, and stops all container lifecycle work. Komodo has a guided plan because it needs Core, a database and Periphery; planning alone changes no container ownership.</p>
+                    <p><a href="https://docs.portainer.io/start/install-ce/server/docker/linux" target="_blank" rel="noopener noreferrer">Portainer</a> covers Docker broadly. <a href="https://getarcane.app/docs/get-started/installation" target="_blank" rel="noopener noreferrer">Arcane</a> is a modern all-rounder. <a href="https://github.com/Finsys/dockhand/blob/main/docker-compose.yaml" target="_blank" rel="noopener noreferrer">Dockhand</a> is Docker-first. <a href="https://komo.do/docs/setup" target="_blank" rel="noopener noreferrer">Komodo</a> focuses on deployment and fleets. <a href="https://github.com/louislam/dockge" target="_blank" rel="noopener noreferrer">Dockge</a> focuses on Compose.</p>
+                    @if (!IsDockerManagerMode)
+                    {
+                        <div class="home-lab-action-row">
+                            @foreach (var managerRecipe in promptRecipes.Where(recipe => recipe.Category.Equals("Docker Management", StringComparison.OrdinalIgnoreCase)))
+                            {
+                                <UiCommandButton Label="@managerRecipe.Name" Glyph="UiIconGlyph.Plus" Variant="UiButtonVariant.Action" OnClick="() => OpenDockerManagerRecipe(managerRecipe.Id)" />
+                            }
+                        </div>
+                    }
+                </section>
+            </TabPage>
+
+            <TabPage Value="prompts" Title="HomeLab Recipes">
+                <section class="surface-subcard home-lab-prompt-intro">
+                    <div>
+                        <p class="eyebrow">Guided AI deployments</p>
+                        <h2>Start with a HomeLab Recipe, then make it yours</h2>
+                        <p class="meta-text">Choose a category, then a recipe from the public Linux Made Sane GitHub catalog. Review what LMS will do, add any precise requirements, then select Go.</p>
+                    </div>
+                </section>
+                <section class="surface-card home-lab-recipe-selector">
+                    <div class="home-lab-recipe-steps">
+                        <div class="home-lab-recipe-choice">
+                            <label for="home-lab-recipe-category">1. Category</label>
+                            <select id="home-lab-recipe-category"
+                                    class="ui-control-input"
+                                    value="@selectedRecipeCategory"
+                                    @onchange="SelectPromptRecipeCategory">
+                                <option value="">Choose a category...</option>
+                                @foreach (var category in RecipeCategories)
+                                {
+                                    <option value="@category">@category</option>
+                                }
+                                <option value="custom">Enter your own</option>
+                            </select>
+                        </div>
+                        @if (!string.IsNullOrWhiteSpace(selectedRecipeCategory) &&
+                             !selectedRecipeCategory.Equals("custom", StringComparison.OrdinalIgnoreCase))
+                        {
+                            <div class="home-lab-recipe-choice">
+                                <label for="home-lab-prompt-recipe">2. Recipe</label>
+                                <select id="home-lab-prompt-recipe"
+                                        class="ui-control-input"
+                                        value="@selectedPromptRecipeId"
+                                        @onchange="SelectPromptRecipe">
+                                    <option value="">Choose a recipe...</option>
+                                    @foreach (var promptRecipe in RecipesInSelectedCategory)
+                                    {
+                                        <option value="@promptRecipe.Id">@promptRecipe.Name</option>
+                                    }
+                                </select>
+                            </div>
+                        }
+                    </div>
+
+                    @if (customizingPromptRecipe is { } selectedRecipe)
+                    {
+                        <div class="home-lab-selected-recipe">
+                            <div class="home-lab-recipe-summary">
+                                <div>
+                                    <p class="eyebrow">@selectedRecipe.Category</p>
+                                    <h3>@selectedRecipe.Name</h3>
+                                    <p>@selectedRecipe.Description</p>
+                                </div>
+                                <dl class="home-lab-recipe-summary-facts">
+                                    <div>
+                                        <dt>What LMS will do</dt>
+                                        <dd>@(selectedRecipe.RequiresPlanning
+                                            ? "Open terminal AI to plan the choices this setup needs."
+                                            : "Open terminal AI to inspect Home Lab and deploy this stack using your settings.")</dd>
+                                    </div>
+                                    <div>
+                                        <dt>Network</dt>
+                                        <dd>Choose exactly where clients connect and which network carries outbound traffic.</dd>
+                                    </div>
+                                </dl>
+                            </div>
+                            <div class="home-lab-recipe-guidance">
+                                <strong>How to use this recipe</strong>
+                                <p>@selectedRecipe.TechnicalGuidance</p>
+                                @if (selectedRecipe.DocumentationSources is { Count: > 0 } sources)
+                                {
+                                    <p class="text-muted small">Upstream documentation checked @selectedRecipe.DocumentationCheckedAtUtc?.ToString("yyyy-MM-dd") UTC:
+                                        @foreach (var source in sources)
+                                        {
+                                            <a href="@source" target="_blank" rel="noopener noreferrer">@(new Uri(source).Host)</a><text> </text>
+                                        }
+                                    </p>
+                                }
+                                <p>After deployment, LMS reports the client URL or host and port. Use that address from devices on the selected network.</p>
+                            </div>
+                            <strong class="home-lab-recipe-field-label">@(selectedRecipe.RequiresPlanning ? "Recipe components" : "Apps being deployed")</strong>
+                            <div class="home-lab-recipe-apps" aria-label="Recipe components">
+                                @foreach (var component in selectedRecipe.Components)
+                                {
+                                    <span>@component</span>
+                                }
+                                @if (selectedRecipe.RequiresVpnGateway)
+                                {
+                                    <span>Existing VPN Gateway</span>
+                                }
+                            </div>
+                            <div class="home-lab-recipe-network-grid">
+                                <div class="home-lab-recipe-choice">
+                                    <label for="home-lab-recipe-listener">Listen interface</label>
+                                    <select id="home-lab-recipe-listener"
+                                            class="ui-control-input"
+                                            value="@selectedPromptListenAddress"
+                                            @onchange="SelectPromptListenAddress">
+                                        <option value="">Choose an interface...</option>
+                                        @foreach (var option in RecipeListenInterfaces)
+                                        {
+                                            <option value="@option.Address">@option.InterfaceName — @option.Address@(RecommendedRecipeListener?.Address == option.Address ? " (recommended)" : "")</option>
+                                        }
+                                    </select>
+                                    <span class="home-lab-network-recommendation"><strong>Recommended:</strong> @RecipeListenerRecommendation</span>
+                                    <span class="meta-text">The host address that accepts incoming connections from browsers, TVs and other clients. It does not choose where app traffic leaves the server.</span>
+                                </div>
+                                <div class="home-lab-recipe-choice home-lab-recipe-vpn-choice">
+                                    <label for="home-lab-recipe-outbound-route">Outbound network</label>
+                                    <select id="home-lab-recipe-outbound-route"
+                                            class="ui-control-input"
+                                            value="@selectedPromptOutboundRoute"
+                                            @onchange="SelectPromptOutboundRoute">
+                                        <option value="">Choose outbound traffic...</option>
+                                        @if (!selectedRecipe.RequiresVpnGateway)
+                                        {
+                                            <option value="direct">Direct — normal host route@(selectedRecipe.NetworkRecommendation?.OutboundRoute == "direct" ? " (recommended)" : "")</option>
+                                        }
+                                        @if (CanRouteRecipeThroughVpn(selectedRecipe))
+                                        {
+                                            @foreach (var gateway in InstalledVpnGateways)
+                                            {
+                                                <option value="vpn:@gateway.Id">VPN — @gateway.DisplayName (@gateway.HealthState)@(RecommendedRecipeGateway?.Id == gateway.Id ? " (recommended)" : "")</option>
+                                            }
+                                        }
+                                    </select>
+                                    <span class="home-lab-network-recommendation"><strong>Recommended:</strong> @selectedRecipe.NetworkRecommendation?.OutboundReason</span>
+                                    @if (selectedRecipe.NetworkRecommendation?.OutboundRoute == "direct")
+                                    {
+                                        <span class="meta-text">@HomeLabRecipeNetworkSelection.DescribeDirectRoute(RecipeListenInterfaces)</span>
+                                    }
+                                    <span class="meta-text">Where app-initiated traffic goes. Direct follows the host routing table for LAN and Internet access; it does not limit traffic to the LAN. VPN uses the selected gateway.</span>
+                                    @if ((selectedRecipe.RequiresVpnGateway || CanRouteRecipeThroughVpn(selectedRecipe)) && !InstalledVpnGateways.Any())
+                                    {
+                                        <UiCommandButton Label="Add VPN Gateway"
+                                                         Glyph="UiIconGlyph.Plus"
+                                                         Variant="UiButtonVariant.ActionSubtle"
+                                                         Disabled="@(busy || startingPromptRecipeId is not null)"
+                                                         OnClick='() => InstallAsync(GetApp("vpn-gateway"))' />
+                                    }
+                                </div>
+                            </div>
+                            @if (selectedRecipe.RequiresPlanning)
+                            {
+                                <p class="meta-text">This recipe needs choices from you before LMS can safely deploy it. The AI will identify supported parts and will not install a misleading partial stack.</p>
+                            }
+                            @if (IsDockerManagerRecipe(selectedRecipe))
+                            {
+                                <label class="home-lab-manager-handoff-consent">
+                                    <input type="checkbox" @bind="dockerManagerHandoffAccepted" />
+                                    <span>I will manage all HomeLab containers in this Docker manager. After it is installed and verified, LMS will hand over every container, including the manager, and stop all container lifecycle changes and new installs.</span>
+                                </label>
+                            }
+                            <div class="home-lab-recipe-network-grid" aria-label="Recipe storage paths">
+                                @foreach (var role in storagePaths.Keys.Where(role => role == HomeLabFilesRole || selectedRecipe.AppIds.Any(id => HomeLabCatalog.GetApp(id).Volumes.Any(volume => volume.SharedRole == role))).ToArray())
+                                {
+                                    <label>@role folder <input class="ui-control-input" @bind="storagePaths[role]" /></label>
+                                }
+                            </div>
+                            <label for="home-lab-recipe-prompt">Base recipe prompt</label>
+                            <textarea id="home-lab-recipe-prompt"
+                                      class="ui-control-textarea"
+                                      @bind="recipePromptDraft"
+                                      @bind:event="oninput"></textarea>
+                            <p class="meta-text">Add versions, variants, databases, admin tools, domains, storage, or other requirements. The AI will explain unsupported details before proposing changes.</p>
+                            <div class="home-lab-prompt-actions">
+                                <UiCommandButton Label="Reset base prompt"
+                                                 Glyph="UiIconGlyph.Refresh"
+                                                 Variant="UiButtonVariant.ActionSubtle"
+                                                 Disabled="@(startingPromptRecipeId is not null)"
+                                                 OnClick="ResetPromptRecipeDraft" />
+                                <UiCommandButton Label="Open terminal AI"
+                                                 Glyph="UiIconGlyph.Ai"
+                                                 Variant="UiButtonVariant.PrimaryMuted"
+                                                 Disabled="@(IsDockerManagerMode || startingPromptRecipeId is not null || string.IsNullOrWhiteSpace(recipePromptDraft) || string.IsNullOrWhiteSpace(selectedPromptListenAddress) || string.IsNullOrWhiteSpace(selectedPromptOutboundRoute) || (IsDockerManagerRecipe(selectedRecipe) && !dockerManagerHandoffAccepted))"
+                                                 OnClick="StartPromptRecipeAsync" />
+                            </div>
+                        </div>
+                    }
+                    else if (selectedPromptRecipeId.Equals("custom", StringComparison.OrdinalIgnoreCase))
+                    {
+                        <div class="home-lab-selected-recipe">
+                            <div>
+                                <p class="eyebrow">Enter your own</p>
+                                <h2>Enter the apps you would like made available by LMS</h2>
+                            </div>
+                            <textarea id="home-lab-custom-prompt"
+                                      class="ui-control-textarea"
+                                      @bind="customPrompt"
+                                      @bind:event="oninput"
+                                      placeholder="For example: WordPress, a database, and a database administration tool"></textarea>
+                            <UiCommandButton Label="Open terminal AI"
+                                             Glyph="UiIconGlyph.Ai"
+                                             Variant="UiButtonVariant.PrimaryMuted"
+                                                         Disabled="@(IsDockerManagerMode || busy || startingPromptRecipeId is not null || string.IsNullOrWhiteSpace(customPrompt))"
+                                             OnClick="StartCustomPromptAsync" />
+                        </div>
+                    }
+                </section>
+            </TabPage>
+
+            <TabPage Value="storage" Title="Storage">
+                @if (!HasHomeLabStorageFolders && workspace.Installations.Count == 0 && !storageSetupRequested)
+                {
+                    <section class="surface-subcard home-lab-storage-panel">
+                        <h2>HomeLab storage has not been set up</h2>
+                        <p class="meta-text">No HomeLab storage folders exist on this box yet. Choose where to keep app files and shared data, then create the folders you need.</p>
+                        <div class="home-lab-action-row">
+                            <UiCommandButton Label="Set up storage" Glyph="UiIconGlyph.NewFolder" Disabled="@busy" OnClick="BeginStorageSetup" />
+                        </div>
+                    </section>
+                }
+                else
+                {
+                <section class="surface-subcard home-lab-storage-panel">
+                    <div>
+                        <p class="eyebrow">HomeLab app files</p>
+                        <h2>@(HasHomeLabStorageFolders ? "One clear folder for every container" : "Create HomeLab storage folders")</h2>
+                        <p class="meta-text">Choose a folder for app files. Create folder prepares it on this box; each installed container will have its own folder inside.</p>
+                    </div>
+                    <div class="home-lab-storage-row">
+                        <label for="storage-home-lab">HomeLab files</label>
+                        <input id="storage-home-lab" class="ui-control-input" @bind="storagePaths[HomeLabFilesRole]" placeholder="/mnt/storage/home-lab" />
+                        <div class="home-lab-storage-actions">
+                            <UiCommandButton Label="@(Directory.Exists(GetHomeLabFilesRoot()) ? "Save" : "Create folder")" Glyph="UiIconGlyph.Save" Variant="UiButtonVariant.ActionSubtle" Disabled="@busy" OnClick="() => SaveStorageRoleAsync(HomeLabFilesRole)" />
+                            <UiCommandButton Label="Browse all files"
+                                             Disabled="@(busy || !Directory.Exists(GetHomeLabFilesRoot()))"
+                                             Glyph="UiIconGlyph.FolderOpen"
+                                             Variant="UiButtonVariant.Action"
+                                             Href="@(Directory.Exists(GetHomeLabFilesRoot()) ? BuildHomeLabFilesUrl() : null)"
+                                             Target="@BuildHomeLabFilesPopupName()"
+                                             Rel="noopener"
+                                             OnClientPointerDown="@(Directory.Exists(GetHomeLabFilesRoot()) ? BuildHomeLabFilesPopupPrepareScript() : null)"
+                                             OnClientClick="@(Directory.Exists(GetHomeLabFilesRoot()) ? BuildHomeLabFilesPopupOpenScript() : null)" />
+                        </div>
+                    </div>
+                </section>
+                <section class="surface-subcard home-lab-storage-panel">
+                    <h2>Clean up unused app folders</h2>
+                    <p class="meta-text">Check for leftover LMS app folders. Registered apps, stopped containers, shared media and mounted folders are preserved. Links are never followed.</p>
+                    <div class="home-lab-action-row"><UiCommandButton Label="Scan unused folders" Glyph="UiIconGlyph.Search" Disabled="@busy" OnClick="ScanCleanupAsync" />
+                    @if(cleanupEntries?.Any(x=>x.Removable)==true) { <UiCommandButton Label="Archive unused folders" Glyph="UiIconGlyph.Delete" Disabled="@busy" OnClick="() => confirmCleanup=true" /> }</div>
+                    <UiCommandButton Label="Show retained folders" Disabled="@busy" OnClick="ShowArchivedAsync" />
+                    @if(archivedEntries is not null) { <ul>@foreach(var entry in archivedEntries) { <li><strong>@entry.Name</strong> · @entry.Reason <UiCommandButton Label="Restore" Disabled="@busy" OnClick="() => RestoreArchivedAsync(entry.ArchiveId!)" /></li> }</ul> }
+                    @if(!string.IsNullOrEmpty(cleanupMessage)) { <p class="callout info" role="status">@cleanupMessage</p> }
+                    @if(cleanupEntries is not null) { <ul>@foreach(var entry in cleanupEntries) { <li><strong>@entry.Name</strong> · @entry.Reason</li> }</ul> }
+                </section>
+                <UiModal IsOpen="@confirmCleanup" Title="Archive unused HomeLab app folders?" OnClose="() => confirmCleanup=false">
+                    <p>Move these folders into .lms-retained? All their files are retained and can be restored. Media links are never followed. Mounted folders and folders now in use stay in place.</p>
+                    <ul>@foreach(var entry in cleanupEntries?.Where(x=>x.Removable) ?? []) { <li>@entry.Path</li> }</ul>
+                    <p class="callout info" role="status">@cleanupMessage</p>
+                    <div class="toolbar-row"><UiCommandButton Label="Archive listed folders" Glyph="UiIconGlyph.Delete" Disabled="@busy" OnClick="CleanupStorageAsync" /><UiCommandButton Label="Cancel" Disabled="@busy" OnClick="() => confirmCleanup=false" /></div>
+                </UiModal>
+                @if (workspace.Installations.Count > 0)
+                {
+                <section class="surface-subcard home-lab-storage-panel">
+                    <div>
+                        <p class="eyebrow">Container storage access</p>
+                        <h2>Use the same paths in every container</h2>
+                        <p class="meta-text">LMS mounts <code>/mnt/storage</code> at <code>/storage</code> inside every HomeLab container. A network share mounted at <code>/mnt/storage/network/nas-media</code> is therefore available to apps at <code>/storage/network/nas-media</code>.</p>
+                        <p class="meta-text">Live mount propagation is enabled from host to container, so network shares added beneath <code>/mnt/storage</code> appear without another container restart.</p>
+                    </div>
+                    <div class="home-lab-action-row">
+                        <UiCommandButton Label="Apply to containers"
+                                         Glyph="UiIconGlyph.NetworkMount"
+                                         Variant="UiButtonVariant.PrimaryMuted"
+                                         Disabled="@busy"
+                                         OnClick="ApplyStandardStorageAsync" />
+                    </div>
+                </section>
+                }
+                <section class="surface-subcard home-lab-storage-panel">
+                    <div>
+                        <p class="eyebrow">Shared storage roles</p>
+                        <h2>Choose host locations once</h2>
+                        <p class="meta-text">Choose the shared folders you need. Create folder prepares the selected path on this box; installed apps can then use it.</p>
+                    </div>
+                    <div class="home-lab-storage-grid">
+                        @foreach (var role in StorageRoles)
+                        {
+                            <div class="home-lab-storage-row">
+                                <label for="storage-@role">@role</label>
+                                <input id="storage-@role" class="ui-control-input" @bind="storagePaths[role]" placeholder="/mnt/storage/@role" />
+                                <UiCommandButton Label="@(Directory.Exists(storagePaths[role]) ? "Save" : "Create folder")" Glyph="UiIconGlyph.Save" Variant="UiButtonVariant.ActionSubtle" Disabled="@busy" OnClick="() => SaveStorageRoleAsync(role)" />
+                            </div>
+                        }
+                    </div>
+                </section>
+                }
+            </TabPage>
+
+        </TabControl>
+    }
+</div>
+
+@code {
+    private bool storageSetupRequested;
+    private bool HasHomeLabStorageFolders => storagePaths.Values.Any(Directory.Exists);
+    private void BeginStorageSetup() => storageSetupRequested = true;
+
+    private const string HomeLabFilesRole = "home-lab";
+    private static readonly string[] StorageRoles = ["downloads", "movies", "tv", "photos"];
+    private readonly Dictionary<string, string> storagePaths = new(StringComparer.OrdinalIgnoreCase)
+    {
+        [HomeLabFilesRole] = "/mnt/storage/home-lab",
+        ["downloads"] = "/mnt/storage/downloads",
+        ["movies"] = "/mnt/storage/movies",
+        ["tv"] = "/mnt/storage/tv",
+        ["photos"] = "/mnt/storage/photos"
+    };
+    private HomeLabWorkspace? workspace;
+    private string message = string.Empty;
+    private bool error;
+    private bool busy;
+    private long actionSelectionRevision;
+    private string activeTab = "apps";
+    private string? startingPromptRecipeId;
+    private string selectedRecipeCategory = string.Empty;
+    private string selectedPromptRecipeId = string.Empty;
+    private string customPrompt = string.Empty;
+    private IReadOnlyList<HomeLabPromptRecipe> promptRecipes = HomeLabPromptRecipeCatalog.All;
+    private HomeLabPromptRecipe? customizingPromptRecipe;
+    private string recipePromptDraft = string.Empty;
+    private bool dockerManagerHandoffAccepted;
+    private Guid? selectedPromptVpnGatewayId;
+    private string selectedPromptListenAddress = string.Empty;
+    private string selectedPromptOutboundRoute = string.Empty;
+    private IReadOnlyList<HomeLabRecipeListenInterface> RecipeListenInterfaces { get; } = LoadRecipeListenInterfaces();
+    private HomeLabRecipeListenInterface? RecommendedRecipeListener =>
+        HomeLabRecipeNetworkSelection.RecommendListener(customizingPromptRecipe?.NetworkRecommendation, RecipeListenInterfaces);
+    private HomeLabAppInstallation? RecommendedRecipeGateway =>
+        customizingPromptRecipe?.NetworkRecommendation?.OutboundRoute == "vpn" &&
+        InstalledVpnGateways.Count(gateway => gateway.HealthState == HomeLabHealthState.Healthy) == 1
+            ? InstalledVpnGateways.Single(gateway => gateway.HealthState == HomeLabHealthState.Healthy) : null;
+    private string RecipeListenerRecommendation =>
+        (customizingPromptRecipe?.NetworkRecommendation?.ListenReason ?? string.Empty) + " " +
+        (RecommendedRecipeListener is { } listener
+            ? listener.Address == "127.0.0.1"
+                ? "No suitable private LAN is available. Localhost is suggested for access from this host only; choose another interface if clients must connect remotely."
+                : $"Suggested here: {listener.InterfaceName} — {listener.Address}."
+            : "Choose the interface your clients use; no single matching interface is available.") +
+        (customizingPromptRecipe?.NetworkRecommendation?.ListenInterface == "tailnet" && !RecipeListenInterfaces.Any(item => item.IsTailnet)
+            ? " No Tailnet interface is available, so a private LAN address is suggested where possible." : string.Empty);
+    private IEnumerable<string> RecipeCategories => promptRecipes
+        .Select(recipe => recipe.Category)
+        .Distinct(StringComparer.OrdinalIgnoreCase);
+    private IEnumerable<HomeLabPromptRecipe> RecipesInSelectedCategory => promptRecipes
+        .Where(recipe => recipe.Category.Equals(selectedRecipeCategory, StringComparison.OrdinalIgnoreCase));
+    private HomeLabAppManifest? configuringApp;
+    private HomeLabAppInstallation? configuringInstallation;
+    private HomeLabInstallationGroup? appAddTargetGroup;
+    private HomeLabInstallationGroup? configuringTargetGroup;
+    private string appAddSelection = string.Empty;
+    private HomeLabAppInstallation? renamingGateway;
+    private HomeLabAppInstallation? pendingRemoval;
+    private HomeLabInstallationGroup? pendingGroupRemoval;
+    private string gatewayRenameValue = string.Empty;
+    private readonly Dictionary<string, string> configurationValues = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, string> secretConfigurationValues = new(StringComparer.OrdinalIgnoreCase);
+    private HomeLabAppInstallation? selectedInstallation;
+    private HomeLabEffectiveConfiguration? effectiveConfiguration;
+    private HomeLabConnectionGuide? connectionGuide;
+    private HomeLabNetworkSecurity? networkSecurity;
+    private EdgeGatewayDashboardViewModel? edgeGatewayDashboard;
+    private IReadOnlyList<EdgeGatewayRouteListItem> edgeGatewayRoutes = [];
+    private readonly Dictionary<Guid, HomeLabNetworkSecurity> summaryNetworkSecurity = [];
+    private readonly HashSet<string> collapsedInstallationGroups = new(StringComparer.Ordinal);
+    private string? selectedLogs;
+    private string settingsTab = "overview";
+    private string containerImageDraft = string.Empty;
+    private string containerEnvironmentDraft = string.Empty;
+    private string containerVolumesDraft = string.Empty;
+    private string composeYamlDraft = string.Empty;
+    private string browserEntryDraft = string.Empty;
+    private bool confirmDockerHandoff;
+    private string externalHostnameDraft = string.Empty;
+    private string externalDomainDraft = string.Empty;
+    private EdgeGatewayAuthMode externalAuthModeDraft = EdgeGatewayAuthMode.RequireMfa;
+    private bool externalAccessLoading;
+    private bool confirmExternalUnpublish;
+    private readonly CancellationTokenSource healthMonitorCancellation = new();
+    private Task? healthMonitorTask;
+    private Task? backgroundRefreshTask;
+    private bool backgroundRefreshInProgress;
+    private bool healthRefreshInProgress;
+    private bool disposed;
+
+    [SupplyParameterFromQuery(Name = "tab")]
+    public string? RequestedTab { get; set; }
+
+    private IEnumerable<HomeLabAppInstallation> InstalledVpnGateways =>
+        workspace?.Installations
+            .Where(item => item.AppId.Equals("vpn-gateway", StringComparison.OrdinalIgnoreCase))
+            .OrderBy(item => item.DisplayName, StringComparer.OrdinalIgnoreCase)
+        ?? Enumerable.Empty<HomeLabAppInstallation>();
+
+    private bool IsDockerManagerMode => workspace?.Installations.Any(item =>
+        item.IsExternallyManaged && HomeLabCatalog.GetApp(item.AppId).IsDockerManager) == true;
+
+    private static bool IsDockerManagerRecipe(HomeLabPromptRecipe recipe) =>
+        recipe.AppIds.Count == 1 && HomeLabCatalog.Apps.Any(app =>
+            app.Id.Equals(recipe.AppIds[0], StringComparison.OrdinalIgnoreCase) && app.IsDockerManager);
+
+    private IReadOnlyList<EdgeGatewayCloudflareDomainOption> AvailableExternalDomains =>
+        edgeGatewayDashboard?.Cloudflare.Domains
+            .Where(domain => domain is
+            {
+                Paused: false,
+                RelayConfigured: true,
+                RelayUsesCloudflareTunnel: true,
+                RelayOwnedByThisLms: true
+            })
+            .OrderByDescending(domain => domain.IsSavedDefault)
+            .ThenBy(domain => domain.DomainName, StringComparer.OrdinalIgnoreCase)
+            .ToArray()
+        ?? [];
+
+    private IReadOnlyList<HomeLabInstallationGroup> BuildInstallationGroups()
+    {
+        if (workspace is null)
+        {
+            return [];
+        }
+
+        var groups = new List<HomeLabInstallationGroup>();
+        var recipeGroups = new List<HomeLabInstallationGroup>();
+        var assignedInstallationIds = new HashSet<Guid>();
+        var gateways = workspace.Installations
+            .Where(IsVpnGateway)
+            .OrderBy(item => item.DisplayName, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        if (gateways.Length > 0)
+        {
+            assignedInstallationIds.UnionWith(gateways.Select(item => item.Id));
+            groups.Add(new("vpn-gateways", "VPN Gateways", "VPN infrastructure", gateways, DateTimeOffset.MaxValue));
+        }
+
+        foreach (var recipeRun in workspace.Deployments
+                     .Where(item => item.RecipeRunId.HasValue || !string.IsNullOrWhiteSpace(item.RecipeId))
+                     .GroupBy(item => item.RecipeRunId ?? item.Id)
+                     .OrderByDescending(items => items.Max(item => item.RecipeRunId.HasValue ? item.UpdatedAtUtc : item.CreatedAtUtc)))
+        {
+            var deployment = recipeRun.OrderByDescending(item => item.UpdatedAtUtc).First();
+            var deploymentIds = recipeRun.Select(item => item.Id).ToHashSet();
+            var installations = workspace.Installations
+                .Where(item => deploymentIds.Contains(item.DeploymentId) && !assignedInstallationIds.Contains(item.Id))
+                .OrderBy(item => item.DisplayName, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+            if (installations.Length == 0)
+            {
+                continue;
+            }
+
+            assignedInstallationIds.UnionWith(installations.Select(item => item.Id));
+            var runDate = deployment.RecipeRunId.HasValue
+                ? recipeRun.Max(item => item.UpdatedAtUtc)
+                : recipeRun.Min(item => item.CreatedAtUtc);
+            recipeGroups.Add(new(
+                $"recipe-{recipeRun.Key:N}",
+                ResolveRecipeName(deployment),
+                FormatRecipeRunDetail(runDate),
+                installations,
+                runDate,
+                deployment.RecipeId,
+                deployment.RecipeRunId,
+                deployment.PromptRecipeId));
+        }
+
+        // HomeLab Recipes originally installed each app as a standalone deployment. Match those
+        // legacy installs by the published recipe app list so existing systems gain useful groups.
+        foreach (var recipe in promptRecipes
+                     .OrderByDescending(item => item.AppIds.Count)
+                     .ThenBy(item => item.Name, StringComparer.OrdinalIgnoreCase))
+        {
+            var runNumber = 0;
+            while (TryMatchRecipeInstallations(recipe, assignedInstallationIds, out var installations))
+            {
+                runNumber++;
+                assignedInstallationIds.UnionWith(installations.Select(item => item.Id));
+                var createdAt = installations.Min(item => item.CreatedAtUtc);
+                recipeGroups.Add(new(
+                    $"prompt-recipe-{recipe.Id}-{runNumber}",
+                    recipe.Name,
+                    FormatRecipeRunDetail(createdAt),
+                    installations,
+                    createdAt,
+                    recipe.Id,
+                    Guid.NewGuid(),
+                    recipe.Id));
+            }
+        }
+
+        groups.AddRange(recipeGroups.OrderByDescending(item => item.SortDate));
+
+        var standalone = workspace.Installations
+            .Where(item => !assignedInstallationIds.Contains(item.Id))
+            .OrderBy(item => item.DisplayName, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        if (standalone.Length > 0)
+        {
+            groups.Add(new("individual", "Individually installed", "Added outside a recipe", standalone, DateTimeOffset.MinValue));
+        }
+
+        return groups;
+    }
+
+    private bool TryMatchRecipeInstallations(
+        HomeLabPromptRecipe recipe,
+        IReadOnlySet<Guid> assignedInstallationIds,
+        out HomeLabAppInstallation[] installations)
+    {
+        var matched = new List<HomeLabAppInstallation>();
+        foreach (var appId in recipe.AppIds)
+        {
+            var installation = workspace!.Installations
+                .Where(item => !assignedInstallationIds.Contains(item.Id) &&
+                               !matched.Any(match => match.Id == item.Id) &&
+                               item.AppId.Equals(appId, StringComparison.OrdinalIgnoreCase))
+                .OrderBy(item => item.CreatedAtUtc)
+                .FirstOrDefault();
+            if (installation is null)
+            {
+                installations = [];
+                return false;
+            }
+
+            matched.Add(installation);
+        }
+
+        var deploymentIds = matched.Select(item => item.DeploymentId).ToHashSet();
+        installations = workspace!.Installations
+            .Where(item => deploymentIds.Contains(item.DeploymentId) &&
+                           !assignedInstallationIds.Contains(item.Id) &&
+                           !IsVpnGateway(item))
+            .OrderBy(item => item.DisplayName, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        return installations.Length > 0;
+    }
+
+    private string ResolveRecipeName(HomeLabDeployment deployment) =>
+        promptRecipes.FirstOrDefault(item => item.Id.Equals(deployment.PromptRecipeId ?? deployment.RecipeId, StringComparison.OrdinalIgnoreCase))?.Name
+        ?? workspace?.Recipes.FirstOrDefault(item => item.Id.Equals(deployment.RecipeId, StringComparison.OrdinalIgnoreCase))?.Name
+        ?? deployment.Name;
+
+    private void ToggleInstallationGroup(string key)
+    {
+        if (!collapsedInstallationGroups.Add(key))
+        {
+            collapsedInstallationGroups.Remove(key);
+        }
+    }
+
+    private static string FormatRecipeRunDetail(DateTimeOffset createdAt) =>
+        $"Recipe run · {createdAt.ToLocalTime():d MMM yyyy, HH:mm}";
+
+    private static string FormatContainerCount(int count) => $"{count} {(count == 1 ? "container" : "containers")}";
+
+    private sealed record HomeLabInstallationGroup(
+        string Key,
+        string Name,
+        string Detail,
+        IReadOnlyList<HomeLabAppInstallation> Installations,
+        DateTimeOffset SortDate,
+        string? RecipeId = null,
+        Guid? RecipeRunId = null,
+        string? PromptRecipeId = null);
+
+    private static IReadOnlyList<HomeLabRecipeListenInterface> LoadRecipeListenInterfaces()
+    {
+        try
+        {
+            return NetworkInterface.GetAllNetworkInterfaces()
+                .Where(item => item.OperationalStatus == OperationalStatus.Up)
+                .SelectMany(item => item.GetIPProperties().UnicastAddresses
+                    .Where(address => address.Address.AddressFamily == AddressFamily.InterNetwork &&
+                                      !IPAddress.IsLoopback(address.Address))
+                    .Select(address => new HomeLabRecipeListenInterface(item.Name, address.Address.ToString(),
+                        item.GetIPProperties().GatewayAddresses.Any(gateway => gateway.Address.AddressFamily == AddressFamily.InterNetwork && !gateway.Address.Equals(IPAddress.Any)),
+                        item.NetworkInterfaceType == NetworkInterfaceType.Tunnel,
+                        item.Name.Contains("tailscale", StringComparison.OrdinalIgnoreCase) || item.Description.Contains("tailscale", StringComparison.OrdinalIgnoreCase))))
+                .Append(new HomeLabRecipeListenInterface("Localhost (this host only)", "127.0.0.1"))
+                .Distinct()
+                .OrderBy(item => item.InterfaceName, StringComparer.OrdinalIgnoreCase)
+                .ThenBy(item => item.Address, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+        }
+        catch
+        {
+            return [new HomeLabRecipeListenInterface("Localhost (this host only)", "127.0.0.1")];
+        }
+    }
+
+    private static bool CanRouteRecipeThroughVpn(HomeLabPromptRecipe recipe) =>
+        recipe.RequiresPlanning ||
+        recipe.RequiresVpnGateway ||
+        recipe.AppIds.Count > 0 && recipe.AppIds.All(appId => HomeLabCatalog.GetApp(appId).SupportsVpnGateway);
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadAsync();
+    }
+
+    protected override Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender)
+        {
+            StartBackgroundRefresh();
+            healthMonitorTask = MonitorRuntimeHealthAfterInitialRefreshAsync(healthMonitorCancellation.Token);
+        }
+
+        return Task.CompletedTask;
+    }
+
+    protected override void OnParametersSet()
+    {
+        activeTab = RequestedTab is "prompts" or "storage" ? RequestedTab : "apps";
+    }
+
+    private async Task LoadAsync()
+    {
+        busy = true;
+        try
+        {
+            workspace = await HomeLabService.GetWorkspaceSnapshotAsync(healthMonitorCancellation.Token);
+            foreach (var role in workspace.StorageRoles)
+            {
+                storagePaths[role.Role] = role.HostPath;
+            }
+        }
+        catch (Exception exception)
+        {
+            SetMessage(exception.Message, true);
+        }
+        finally
+        {
+            busy = false;
+        }
+
+    }
+
+    private async Task RefreshAsync()
+    {
+        await LoadAsync();
+        StartBackgroundRefresh();
+    }
+
+    private void StartBackgroundRefresh()
+    {
+        if (disposed || backgroundRefreshInProgress)
+        {
+            return;
+        }
+
+        backgroundRefreshInProgress = true;
+        backgroundRefreshTask = RefreshBackgroundStateAsync(healthMonitorCancellation.Token);
+    }
+
+    private async Task RefreshBackgroundStateAsync(CancellationToken cancellationToken)
+    {
+        await Task.Yield();
+        try
+        {
+            await using var scope = ServiceScopeFactory.CreateAsyncScope();
+            var homeLabService = scope.ServiceProvider.GetRequiredService<IHomeLabService>();
+            var promptRecipeProvider = scope.ServiceProvider.GetRequiredService<IHomeLabPromptRecipeProvider>();
+            var edgeGatewayService = scope.ServiceProvider.GetRequiredService<IEdgeGatewayService>();
+
+            // Page entry must avoid full workspace reconciliation because that can
+            // execute container configuration checks. Snapshot loading performs only
+            // lightweight saved-state and endpoint-metadata work.
+            var refreshedWorkspace = await homeLabService.GetWorkspaceSnapshotAsync(cancellationToken);
+            await InvokeAsync(() =>
+            {
+                if (disposed)
+                {
+                    return;
+                }
+
+                workspace = refreshedWorkspace;
+                var installationIds = refreshedWorkspace.Installations.Select(item => item.Id).ToHashSet();
+                foreach (var staleId in summaryNetworkSecurity.Keys.Where(id => !installationIds.Contains(id)).ToArray())
+                {
+                    summaryNetworkSecurity.Remove(staleId);
+                }
+
+                foreach (var role in refreshedWorkspace.StorageRoles)
+                {
+                    storagePaths[role.Role] = role.HostPath;
+                }
+
+                StateHasChanged();
+            });
+
+            // Only VPN-routed apps need a summary probe. Direct apps and VPN gateways
+            // already have a deterministic compact state, and probing their public IP
+            // can add tens of seconds per container when the Internet is unavailable.
+            foreach (var installation in refreshedWorkspace.Installations.Where(item => IsVpnRoute(item.NetworkMode)))
+            {
+                HomeLabNetworkSecurity security;
+                try
+                {
+                    security = await homeLabService.GetNetworkSecurityAsync(installation.Id, cancellationToken);
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch (Exception exception)
+                {
+                    security = CreateUnavailableNetworkSecurity(installation, exception.Message);
+                }
+
+                await InvokeAsync(() =>
+                {
+                    if (disposed)
+                    {
+                        return;
+                    }
+
+                    summaryNetworkSecurity[installation.Id] = security;
+                    StateHasChanged();
+                });
+            }
+
+            IReadOnlyList<EdgeGatewayRouteListItem>? refreshedRoutes = null;
+            EdgeGatewayDashboardViewModel? refreshedDashboard = null;
+            try
+            {
+                refreshedRoutes = await edgeGatewayService.ListRoutesAsync(cancellationToken);
+                refreshedDashboard = await edgeGatewayService.GetDashboardAsync(cancellationToken);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch
+            {
+                // Keep the currently displayed Edge Gateway state if its refresh is unavailable.
+            }
+
+            await InvokeAsync(() =>
+            {
+                if (disposed)
+                {
+                    return;
+                }
+
+                workspace = refreshedWorkspace;
+                if (refreshedRoutes is not null)
+                {
+                    edgeGatewayRoutes = refreshedRoutes;
+                    edgeGatewayDashboard = refreshedDashboard;
+                }
+
+                StateHasChanged();
+            });
+
+            var refreshedRecipes = await promptRecipeProvider.GetRecipesAsync(cancellationToken);
+            await InvokeAsync(() =>
+            {
+                if (disposed)
+                {
+                    return;
+                }
+
+                promptRecipes = refreshedRecipes;
+                StateHasChanged();
+            });
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
+        catch
+        {
+            // Keep the fast saved snapshot visible; a manual refresh can retry live discovery.
+        }
+        finally
+        {
+            backgroundRefreshInProgress = false;
+            if (!disposed)
+            {
+                try
+                {
+                    await InvokeAsync(StateHasChanged);
+                }
+                catch (InvalidOperationException) when (disposed) { }
+            }
+        }
+    }
+
+    private async Task MonitorRuntimeHealthAfterInitialRefreshAsync(CancellationToken cancellationToken)
+    {
+        if (backgroundRefreshTask is not null)
+        {
+            await backgroundRefreshTask;
+        }
+
+        await MonitorRuntimeHealthAsync(cancellationToken);
+    }
+
+    private async Task MonitorRuntimeHealthAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            using var timer = new PeriodicTimer(TimeSpan.FromSeconds(2));
+            var stableTicks = 0;
+            while (await timer.WaitForNextTickAsync(cancellationToken))
+            {
+                await InvokeAsync(async () =>
+                {
+                    if (disposed || busy || backgroundRefreshInProgress || healthRefreshInProgress || workspace is null)
+                    {
+                        return;
+                    }
+
+                    var hasTransitionalState = workspace.Installations.Any(item =>
+                        item.HealthState is HomeLabHealthState.Starting or HomeLabHealthState.Degraded or HomeLabHealthState.Blocked);
+                    if (!hasTransitionalState && ++stableTicks < 8)
+                    {
+                        return;
+                    }
+
+                    stableTicks = 0;
+                    healthRefreshInProgress = true;
+                    try
+                    {
+                        var health = await HomeLabService.RefreshRuntimeHealthAsync(cancellationToken);
+                        ApplyRuntimeHealth(health);
+                        StateHasChanged();
+                    }
+                    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
+                    catch
+                    {
+                        // Keep the current snapshot and try again on the next interval.
+                    }
+                    finally
+                    {
+                        healthRefreshInProgress = false;
+                    }
+                });
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
+    }
+
+    private void ApplyRuntimeHealth(IReadOnlyList<HomeLabRuntimeHealth> health)
+    {
+        if (workspace is null || health.Count == 0)
+        {
+            return;
+        }
+
+        var healthByInstallation = health.ToDictionary(item => item.InstallationId);
+        var installations = workspace.Installations.Select(installation =>
+        {
+            if (!healthByInstallation.TryGetValue(installation.Id, out var current))
+            {
+                return installation;
+            }
+
+            return installation with
+            {
+                HealthState = current.HealthState,
+                HealthDetail = current.HealthDetail,
+                UpdatedAtUtc = current.UpdatedAtUtc
+            };
+        }).ToArray();
+        workspace = workspace with { Installations = installations };
+
+        if (selectedInstallation is { } selected)
+        {
+            selectedInstallation = installations.FirstOrDefault(item => item.Id == selected.Id);
+        }
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        disposed = true;
+        await healthMonitorCancellation.CancelAsync();
+        if (healthMonitorTask is not null)
+        {
+            try { await healthMonitorTask; }
+            catch (OperationCanceledException) { }
+        }
+        if (backgroundRefreshTask is not null)
+        {
+            try { await backgroundRefreshTask; }
+            catch (OperationCanceledException) { }
+        }
+        healthMonitorCancellation.Dispose();
+    }
+
+    private Task HandleTabChangedAsync(string? value)
+    {
+        activeTab = value is "prompts" or "storage" ? value : "apps";
+        Navigation.NavigateTo(Navigation.GetUriWithQueryParameter("tab", activeTab), replace: true);
+        return Task.CompletedTask;
+    }
+
+    private async Task HandleSettingsTabChangedAsync(string? value)
+    {
+        settingsTab = value is "connections" or "network" or "external" or "container" or "advanced" or "logs" ? value : "overview";
+        if (settingsTab != "external" || selectedInstallation is null)
+        {
+            return;
+        }
+
+        externalAccessLoading = true;
+        try
+        {
+            await RefreshEdgeGatewayStateAsync();
+            await LoadExternalAccessDraftAsync(selectedInstallation);
+        }
+        catch (Exception exception)
+        {
+            SetMessage($"Could not load Edge Gateway publishing options: {exception.Message}", true);
+        }
+        finally
+        {
+            externalAccessLoading = false;
+        }
+    }
+
+    private IReadOnlyList<HomeLabCleanupEntry>? archivedEntries;
+    private async Task ShowArchivedAsync()
+    {
+        busy=true;cleanupMessage="Loading retained folders…";await InvokeAsync(StateHasChanged);
+        try { archivedEntries=await HomeLabService.ScanArchivedStorageAsync();cleanupMessage=$"{archivedEntries.Count} retained folders. Restore never overwrites an existing folder."; }
+        catch(Exception e) { cleanupMessage=e.Message; }
+        finally { busy=false; }
+    }
+    private async Task RestoreArchivedAsync(string id)
+    {
+        busy=true;cleanupMessage="Restoring retained folder…";await InvokeAsync(StateHasChanged);
+        try { var restored=await HomeLabService.RestoreArchivedStorageAsync(id);cleanupMessage=restored.Single(x=>x.ArchiveId==id).Reason;archivedEntries=await HomeLabService.ScanArchivedStorageAsync(); }
+        catch(Exception e) { cleanupMessage=e.Message; }
+        finally { busy=false; }
+    }
+    private IReadOnlyList<HomeLabCleanupEntry>? cleanupEntries;
+    private string cleanupMessage="";
+    private bool confirmCleanup;
+    private async Task ScanCleanupAsync()
+    {
+        busy=true;cleanupMessage="Checking app references, Docker containers and filesystem mounts…";await InvokeAsync(StateHasChanged);
+        try { cleanupEntries=await HomeLabService.ScanUnusedStorageAsync();cleanupMessage=$"Found {cleanupEntries.Count(x=>x.Removable)} unused app folders. Review the list before archiving them."; }
+        catch(Exception e) { cleanupMessage=e.Message;cleanupEntries=null; }
+        finally { busy=false; }
+    }
+    private async Task CleanupStorageAsync()
+    {
+        var names=cleanupEntries?.Where(x=>x.Removable).Select(x=>x.Name).ToArray() ?? [];
+        busy=true;cleanupMessage="Rechecking storage safety and archiving listed unused folders…";await InvokeAsync(StateHasChanged);
+        try { var results=await HomeLabService.CleanupUnusedStorageAsync(names);cleanupEntries=results;cleanupMessage=$"Archived {results.Count(x=>x.Removed)} folders; all files retained. Protected or newly used folders were preserved.";confirmCleanup=false; }
+        catch(Exception e) { cleanupMessage=e.Message; }
+        finally { busy=false; }
+    }
+
+    private async Task SaveStorageRoleAsync(string role)
+    {
+        await RunUiOperationAsync(async () =>
+        {
+            await HomeLabService.SaveStorageRoleAsync(role, storagePaths[role]);
+            SetMessage($"Storage folder '{storagePaths[role]}' is ready.", false);
+        });
+    }
+
+    private async Task ApplyStandardStorageAsync()
+    {
+        await RunUiOperationAsync(async () =>
+        {
+            var result = await HomeLabService.ApplyStandardStorageAsync();
+            SetMessage($"{result.Summary} {result.Detail}", !result.Succeeded);
+        });
+    }
+
+    private string GetHomeLabFilesRoot() => storagePaths.GetValueOrDefault(HomeLabFilesRole, "/mnt/storage/home-lab");
+
+    private string GetContainerFilesPath(HomeLabAppInstallation installation) =>
+        Path.Combine(GetHomeLabFilesRoot(), installation.ContainerName);
+
+    private string BuildHomeLabFilesUrl(HomeLabAppInstallation? installation = null)
+    {
+        var path = installation is null ? GetHomeLabFilesRoot() : GetContainerFilesPath(installation);
+        var title = installation is null ? "HomeLab files" : $"{installation.DisplayName} files";
+        return $"/file-browser-window?rootPath={Uri.EscapeDataString(path)}&path={Uri.EscapeDataString(path)}&title={Uri.EscapeDataString(title)}";
+    }
+
+    private static string BuildHomeLabFilesPopupName(HomeLabAppInstallation? installation = null) =>
+        installation is null ? "lms-homelab-files" : $"lms-homelab-files-{installation.Id:N}";
+
+    private RenderFragment RenderAccessItem(string item) => builder =>
+    {
+        var resolved = ResolveAccessUrl(item);
+        var urlIndex = item.IndexOf("http", StringComparison.OrdinalIgnoreCase);
+        if (resolved is null || urlIndex < 0)
+        {
+            builder.OpenElement(0, "code");
+            builder.AddContent(1, item);
+            builder.CloseElement();
+            return;
+        }
+
+        builder.OpenElement(2, "span");
+        builder.AddContent(3, item[..urlIndex]);
+        builder.OpenElement(4, "a");
+        builder.AddAttribute(5, "href", resolved);
+        builder.AddAttribute(6, "target", "_blank");
+        builder.AddAttribute(7, "rel", "noopener");
+        builder.AddContent(8, resolved);
+        builder.CloseElement();
+        builder.CloseElement();
+    };
+
+    private string? ResolveAccessUrl(string item)
+    {
+        var urlIndex = item.IndexOf("http", StringComparison.OrdinalIgnoreCase);
+        if (urlIndex < 0)
+        {
+            return null;
+        }
+
+        var candidate = item[urlIndex..].Trim();
+        var host = Navigation.ToAbsoluteUri(Navigation.BaseUri).Host;
+        candidate = candidate.Replace("<LMS host>", host, StringComparison.OrdinalIgnoreCase);
+        return Uri.TryCreate(candidate, UriKind.Absolute, out var uri) &&
+               (uri.Scheme.Equals("http", StringComparison.OrdinalIgnoreCase) || uri.Scheme.Equals("https", StringComparison.OrdinalIgnoreCase))
+            ? uri.ToString()
+            : null;
+    }
+
+    private static string BuildHomeLabFilesPopupPrepareScript(
+        HomeLabAppInstallation? installation = null,
+        int width = 1180,
+        int height = 860) =>
+        $"window.lmsTerminalWindow.preparePopup('{BuildHomeLabFilesPopupName(installation)}', {width}, {height});";
+
+    private static string BuildHomeLabFilesPopupOpenScript(int width = 1180, int height = 860) =>
+        $"window.lmsTerminalWindow.openPopup(this.href, this.target, {width}, {height}); return false;";
+
+    private void SelectPromptRecipeCategory(ChangeEventArgs eventArgs)
+    {
+        dockerManagerHandoffAccepted = false;
+        selectedRecipeCategory = eventArgs.Value?.ToString()?.Trim() ?? string.Empty;
+        selectedPromptRecipeId = selectedRecipeCategory.Equals("custom", StringComparison.OrdinalIgnoreCase)
+            ? "custom"
+            : string.Empty;
+        customizingPromptRecipe = null;
+        recipePromptDraft = string.Empty;
+        selectedPromptVpnGatewayId = null;
+        selectedPromptListenAddress = string.Empty;
+        selectedPromptOutboundRoute = string.Empty;
+    }
+
+    private void OpenDockerManagerRecipe(string recipeId)
+    {
+        selectedRecipeCategory = "Docker Management";
+        SelectPromptRecipe(new ChangeEventArgs { Value = recipeId });
+        activeTab = "prompts";
+    }
+
+    private void SelectPromptRecipe(ChangeEventArgs eventArgs)
+    {
+        dockerManagerHandoffAccepted = false;
+        selectedPromptRecipeId = eventArgs.Value?.ToString()?.Trim() ?? string.Empty;
+        selectedPromptVpnGatewayId = null;
+        selectedPromptListenAddress = string.Empty;
+        selectedPromptOutboundRoute = string.Empty;
+        if (selectedPromptRecipeId.Equals("custom", StringComparison.OrdinalIgnoreCase))
+        {
+            customizingPromptRecipe = null;
+            recipePromptDraft = string.Empty;
+            return;
+        }
+
+        var promptRecipe = promptRecipes.FirstOrDefault(recipe =>
+            recipe.Id.Equals(selectedPromptRecipeId, StringComparison.OrdinalIgnoreCase));
+        customizingPromptRecipe = promptRecipe;
+        recipePromptDraft = promptRecipe?.StarterPrompt ?? string.Empty;
+        selectedPromptListenAddress = RecommendedRecipeListener?.Address ?? string.Empty;
+        selectedPromptOutboundRoute = promptRecipe?.NetworkRecommendation?.OutboundRoute == "direct"
+            ? "direct" : RecommendedRecipeGateway is { } gateway ? $"vpn:{gateway.Id}" : string.Empty;
+        selectedPromptVpnGatewayId = RecommendedRecipeGateway?.Id;
+    }
+
+    private IReadOnlyList<HomeLabAppManifest> AppsAvailableForGroup(HomeLabInstallationGroup group) =>
+        HomeLabCatalog.VisibleApps
+            .Where(app => !app.IsDockerManager)
+            .Where(app => !group.Installations.Any(installation => installation.AppId.Equals(app.Id, StringComparison.OrdinalIgnoreCase)))
+            .OrderBy(app => app.Name, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+    private void BeginAddAppToGroup(HomeLabInstallationGroup group)
+    {
+        if (busy || !group.RecipeRunId.HasValue)
+        {
+            return;
+        }
+
+        appAddTargetGroup = group;
+        appAddSelection = string.Empty;
+    }
+
+    private void SelectAppToAddToGroup(ChangeEventArgs eventArgs) =>
+        appAddSelection = eventArgs.Value?.ToString()?.Trim() ?? string.Empty;
+
+    private void ConfigureAppForGroup()
+    {
+        if (appAddTargetGroup is not { } group || string.IsNullOrWhiteSpace(appAddSelection))
+        {
+            return;
+        }
+
+        var app = AppsAvailableForGroup(group).FirstOrDefault(item => item.Id.Equals(appAddSelection, StringComparison.OrdinalIgnoreCase));
+        if (app is null)
+        {
+            return;
+        }
+
+        configuringTargetGroup = group;
+        appAddTargetGroup = null;
+        configuringApp = app;
+        configuringInstallation = null;
+        configurationValues.Clear();
+        secretConfigurationValues.Clear();
+        if (app.SupportsVpnGateway)
+        {
+            configurationValues["network-route"] = "VPN Gateway (Gluetun)";
+            var gateways = InstalledVpnGateways.ToArray();
+            if (gateways.Length == 1)
+            {
+                configurationValues["vpn-gateway"] = gateways[0].Id.ToString();
+            }
+        }
+        appAddSelection = string.Empty;
+    }
+
+    private void CancelAddAppToGroup()
+    {
+        if (!busy)
+        {
+            appAddTargetGroup = null;
+            appAddSelection = string.Empty;
+        }
+    }
+
+    private void SelectPromptListenAddress(ChangeEventArgs eventArgs)
+    {
+        selectedPromptListenAddress = eventArgs.Value?.ToString()?.Trim() ?? string.Empty;
+    }
+
+    private void SelectPromptOutboundRoute(ChangeEventArgs eventArgs)
+    {
+        selectedPromptOutboundRoute = eventArgs.Value?.ToString()?.Trim() ?? string.Empty;
+        selectedPromptVpnGatewayId = selectedPromptOutboundRoute.StartsWith("vpn:", StringComparison.OrdinalIgnoreCase) &&
+                                     Guid.TryParse(selectedPromptOutboundRoute[4..], out var gatewayId)
+            ? gatewayId
+            : null;
+    }
+
+    private void ResetPromptRecipeDraft()
+    {
+        if (customizingPromptRecipe is { } promptRecipe)
+        {
+            recipePromptDraft = promptRecipe.StarterPrompt;
+        }
+    }
+
+    private async Task StartPromptRecipeAsync()
+    {
+        if (customizingPromptRecipe is not { } promptRecipe || string.IsNullOrWhiteSpace(recipePromptDraft))
+        {
+            return;
+        }
+
+        if (IsDockerManagerMode || IsDockerManagerRecipe(promptRecipe) && !dockerManagerHandoffAccepted)
+        {
+            SetMessage("Confirm the Docker manager handoff before starting this recipe.", true);
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(selectedPromptListenAddress) || string.IsNullOrWhiteSpace(selectedPromptOutboundRoute))
+        {
+            SetMessage("Choose a listen interface and outbound network before starting this recipe.", true);
+            return;
+        }
+
+        var deployment = new
+        {
+            promptRecipeId = promptRecipe.Id,
+            listenAddress = selectedPromptListenAddress,
+            outboundRoute = selectedPromptVpnGatewayId.HasValue ? "vpn" : "direct",
+            vpnGatewayInstallationId = selectedPromptVpnGatewayId,
+            storagePaths
+        };
+        await StartAiPromptAsync(promptRecipe.Id, promptRecipe.Name,
+            $"Set up this recipe using the regular terminal agent.\nUser requirements: {recipePromptDraft}\nChosen deployment settings: {JsonSerializer.Serialize(deployment)}\nRecipe: {JsonSerializer.Serialize(new { promptRecipe.Id, promptRecipe.Name, promptRecipe.AppIds, promptRecipe.VpnRoutedAppIds, promptRecipe.RequiresPlanning, promptRecipe.TechnicalGuidance, promptRecipe.Connectivity, promptRecipe.DocumentationSources, promptRecipe.DocumentationCheckedAtUtc })}\n" +
+            (promptRecipe.RequiresPlanning ? "This is a planning recipe. Explain what is supported and ask for the missing choices before proposing a deployment." : "Inspect first, then deploy the supported recipe through LMS. Verify the actual client endpoint. If it fails, diagnose and fix the cause using logs and config rather than repeating repair."));
+    }
+
+    private Task StartCustomPromptAsync() => string.IsNullOrWhiteSpace(customPrompt)
+        ? Task.CompletedTask
+        : StartAiPromptAsync("custom", "Custom setup", $"Plan and set up these services: {customPrompt}\nUse the supported recipe catalog and LMS-managed operations where appropriate. Explain unsupported requirements before changing anything.\nSupported recipes: {JsonSerializer.Serialize(promptRecipes.Select(recipe => new { recipe.Id, recipe.Name, recipe.AppIds, recipe.RequiresPlanning }))}");
+
+    private Task StartContainerHelpAsync(HomeLabAppInstallation installation) =>
+        StartAiPromptAsync($"help-{installation.Id}", $"Repair {installation.DisplayName}",
+            $"Diagnose and repair this container. Inspect its current state, logs, network and config. If managed repair fails, investigate the cause and apply a focused fix. Verify the actual service endpoint.\nContainer context: {JsonSerializer.Serialize(installation)}");
+
+    private Task StartGroupRepairHelpAsync(HomeLabInstallationGroup group) =>
+        StartAiPromptAsync($"repair-group-{group.Key}", $"Repair {group.Name}",
+            $"Diagnose and repair this whole stack, including dependencies and networking. Verify the requested services after each fix.\nStack: {group.Name}\nContainers: {JsonSerializer.Serialize(group.Installations)}");
+
+    private async Task StartAiPromptAsync(string promptId, string title, string prompt)
+    {
+        if (startingPromptRecipeId is not null) return;
+        startingPromptRecipeId = promptId;
+        message = string.Empty;
+        error = false;
+        try
+        {
+            Navigation.NavigateTo(await TerminalTaskLauncher.OpenAsync(title, prompt));
+        }
+        catch (Exception exception)
+        {
+            message = exception.Message;
+            error = true;
+        }
+        finally { startingPromptRecipeId = null; }
+    }
+
+    private async Task InstallAsync(HomeLabAppManifest app)
+    {
+        configuringTargetGroup = null;
+        if (app.ConfigurationSchema.Count > 0 || app.SupportsVpnGateway)
+        {
+            configuringApp = app;
+            configuringInstallation = null;
+            configurationValues.Clear();
+            secretConfigurationValues.Clear();
+            if (app.SupportsVpnGateway)
+            {
+                configurationValues["network-route"] = "VPN Gateway (Gluetun)";
+                var gateways = InstalledVpnGateways.ToArray();
+                if (gateways.Length == 1)
+                {
+                    configurationValues["vpn-gateway"] = gateways[0].Id.ToString();
+                }
+            }
+            if (app.Id.Equals("vpn-gateway", StringComparison.OrdinalIgnoreCase))
+            {
+                configurationValues["gateway-name"] = NextGatewayName();
+                configurationValues["configuration-mode"] = "Paste provider config";
+                configurationValues["provider"] = "ProtonVPN";
+                configurationValues["protocol"] = "WireGuard";
+                configurationValues["port-forwarding"] = HomeLabVpnPortForwardingPlan.RequiredSelection;
+            }
+            activeTab = "apps";
+            return;
+        }
+
+        await RunUiOperationAsync(async () =>
+        {
+            var paths = storagePaths
+                .Where(item => app.Volumes.Any(volume => volume.SharedRole?.Equals(item.Key, StringComparison.OrdinalIgnoreCase) == true))
+                .ToDictionary(item => item.Key, item => item.Value, StringComparer.OrdinalIgnoreCase);
+            var result = await HomeLabService.InstallAppAsync(new HomeLabInstallRequest(app.Id, StoragePaths: paths));
+            SetMessage($"{result.Summary} {result.Detail}", !result.Succeeded);
+        });
+    }
+
+    private async Task InstallConfiguredAsync()
+    {
+        if (configuringApp is not { } app)
+        {
+            return;
+        }
+
+        await RunUiOperationAsync(async () =>
+        {
+            var targetGroup = configuringTargetGroup;
+            var existingInstallationIds = workspace?.Installations.Select(item => item.Id).ToHashSet() ?? [];
+            var paths = storagePaths
+                .Where(item => app.Volumes.Any(volume => volume.SharedRole?.Equals(item.Key, StringComparison.OrdinalIgnoreCase) == true))
+                .ToDictionary(item => item.Key, item => item.Value, StringComparer.OrdinalIgnoreCase);
+            var result = configuringInstallation is { } gateway
+                ? await HomeLabService.ReconfigureVpnGatewayAsync(
+                    gateway.Id,
+                    configurationValues,
+                    secretConfigurationValues)
+                : await HomeLabService.InstallAppAsync(new HomeLabInstallRequest(
+                    app.Id,
+                    StoragePaths: paths,
+                    Configuration: configurationValues,
+                    SecretConfiguration: secretConfigurationValues));
+            if (result.Succeeded && targetGroup?.RecipeRunId is Guid recipeRunId)
+            {
+                var updatedWorkspace = await HomeLabService.GetWorkspaceAsync();
+                var addedInstallation = updatedWorkspace.Installations
+                    .Where(item => !existingInstallationIds.Contains(item.Id) && item.AppId.Equals(app.Id, StringComparison.OrdinalIgnoreCase))
+                    .OrderByDescending(item => item.CreatedAtUtc)
+                    .FirstOrDefault();
+                if (addedInstallation is not null)
+                {
+                    var recipeId = targetGroup.PromptRecipeId ?? targetGroup.RecipeId;
+                    if (!string.IsNullOrWhiteSpace(recipeId))
+                    {
+                        await HomeLabService.AssignRecipeRunAsync(new HomeLabRecipeRunAssignment(
+                            recipeId,
+                            targetGroup.Name,
+                            recipeRunId,
+                            targetGroup.Installations.Select(item => item.Id).Append(addedInstallation.Id).ToArray()));
+                    }
+                }
+            }
+            SetMessage($"{result.Summary} {result.Detail}", !result.Succeeded);
+            if (result.Succeeded)
+            {
+                configuringApp = null;
+                configuringInstallation = null;
+                configuringTargetGroup = null;
+                configurationValues.Clear();
+                secretConfigurationValues.Clear();
+            }
+        });
+    }
+
+    private async Task ManageAsync(HomeLabAppInstallation installation)
+    {
+        if (busy)
+        {
+            return;
+        }
+        busy = true;
+        try
+        {
+            var loadedConfiguration = await HomeLabService.GetEffectiveConfigurationAsync(installation.DeploymentId);
+            var loadedConnectionGuide = await HomeLabService.GetConnectionGuideAsync(installation.Id);
+            effectiveConfiguration = loadedConfiguration;
+            connectionGuide = loadedConnectionGuide;
+            networkSecurity = GetSummaryNetworkSecurity(installation);
+            selectedInstallation = installation;
+            browserEntryDraft = installation.BrowserEntry ?? string.Empty;
+            selectedLogs = null;
+            settingsTab = "overview";
+            externalHostnameDraft = string.Empty;
+            externalDomainDraft = string.Empty;
+            externalAuthModeDraft = EdgeGatewayAuthMode.RequireMfa;
+            externalAccessLoading = false;
+            ResetContainerSettingsDraft();
+            composeYamlDraft = (await HomeLabService.GetDockerManagementDraftAsync(installation.Id)).ComposeYaml;
+            confirmDockerHandoff = false;
+            await LoadSelectedLogsCoreAsync();
+            activeTab = "apps";
+        }
+        catch (Exception exception)
+        {
+            var detail = exception.Message;
+            if (exception.InnerException is { Message: { Length: > 0 } innerMessage } &&
+                !detail.Contains(innerMessage, StringComparison.Ordinal))
+            {
+                detail = $"{detail} ({innerMessage})";
+            }
+            SetMessage(detail, true);
+        }
+        finally
+        {
+            busy = false;
+        }
+    }
+
+    private void CloseDetails()
+    {
+        selectedInstallation = null;
+        effectiveConfiguration = null;
+        connectionGuide = null;
+        networkSecurity = null;
+        selectedLogs = null;
+        settingsTab = "overview";
+        containerImageDraft = string.Empty;
+        containerEnvironmentDraft = string.Empty;
+        containerVolumesDraft = string.Empty;
+        composeYamlDraft = string.Empty;
+        confirmDockerHandoff = false;
+        externalHostnameDraft = string.Empty;
+        externalDomainDraft = string.Empty;
+        externalAccessLoading = false;
+        externalAuthModeDraft = EdgeGatewayAuthMode.RequireMfa;
+        confirmExternalUnpublish = false;
+    }
+
+    private void ResetContainerSettingsDraft()
+    {
+        if (selectedInstallation is null || effectiveConfiguration is null)
+        {
+            return;
+        }
+
+        var details = effectiveConfiguration.Containers.FirstOrDefault(item =>
+            item.ContainerName.Equals(selectedInstallation.ContainerName, StringComparison.OrdinalIgnoreCase));
+        if (details is null)
+        {
+            return;
+        }
+
+        var app = GetApp(details.AppId);
+        var managedKeys = app.Ports
+            .Select(port => port.VpnEnvironmentVariable)
+            .Where(key => !string.IsNullOrWhiteSpace(key))
+            .Cast<string>()
+            .Append(app.PublicUrlEnvironmentVariable ?? string.Empty)
+            .Where(key => key.Length > 0)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        containerImageDraft = details.Image;
+        containerEnvironmentDraft = string.Join(
+            Environment.NewLine,
+            details.Environment.Where(item => IsEditableEnvironmentEntry(item, managedKeys)));
+        containerVolumesDraft = string.Join(Environment.NewLine, details.Volumes);
+    }
+
+    private async Task SaveBrowserEntryAsync()
+    {
+        if (selectedInstallation is null) return;
+        await RunUiOperationAsync(async () =>
+        {
+            var result = await HomeLabService.SetBrowserEntryAsync(selectedInstallation.Id, browserEntryDraft);
+            SetMessage($"{result.Summary} {result.Detail}", !result.Succeeded);
+        });
+    }
+
+    private async Task SaveContainerSettingsAsync()
+    {
+        if (selectedInstallation is null || busy)
+        {
+            return;
+        }
+
+        IReadOnlyDictionary<string, string> environment;
+        IReadOnlyList<HomeLabContainerVolumeSetting> volumes;
+        try
+        {
+            environment = ParseEnvironmentDraft(containerEnvironmentDraft);
+            volumes = ParseVolumeDraft(containerVolumesDraft);
+        }
+        catch (InvalidOperationException exception)
+        {
+            SetMessage(exception.Message, true);
+            return;
+        }
+
+        await RunUiOperationAsync(async () =>
+        {
+            var result = await HomeLabService.UpdateContainerSettingsAsync(
+                selectedInstallation.Id,
+                new HomeLabContainerSettingsUpdate(containerImageDraft, environment, volumes));
+            SetMessage($"{result.Summary} {result.Detail}", !result.Succeeded);
+        });
+    }
+
+    private async Task SaveComposeDraftAsync()
+    {
+        if (selectedInstallation is null || busy) return;
+        await RunUiOperationAsync(async () =>
+        {
+            var saved = await HomeLabService.SaveDockerManagementDraftAsync(selectedInstallation.Id, composeYamlDraft);
+            composeYamlDraft = saved.ComposeYaml;
+            SetMessage("Compose file saved. The running container was not changed.", false);
+        });
+    }
+
+    private async Task HandOffToDockerManagerAsync()
+    {
+        if (selectedInstallation is null || busy) return;
+        await RunUiOperationAsync(async () =>
+        {
+            var saved = await HomeLabService.HandOffToDockerManagerAsync(selectedInstallation.Id, composeYamlDraft);
+            composeYamlDraft = saved.ComposeYaml;
+            confirmDockerHandoff = false;
+            settingsTab = "advanced";
+            SetMessage("Handoff complete. LMS will no longer change or recreate this container. Manage it in your Docker manager.", false);
+        });
+    }
+
+    private async Task RestoreContainerSettingsAsync()
+    {
+        if (selectedInstallation is null || busy)
+        {
+            return;
+        }
+
+        await RunUiOperationAsync(async () =>
+        {
+            var result = await HomeLabService.RestoreContainerSettingsAsync(selectedInstallation.Id);
+            SetMessage($"{result.Summary} {result.Detail}", !result.Succeeded);
+        });
+    }
+
+    private static bool IsEditableEnvironmentEntry(string entry, IReadOnlySet<string> managedKeys)
+    {
+        var separator = entry.IndexOf('=');
+        if (separator <= 0 || entry.Contains("<redacted", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var key = entry[..separator];
+        return !managedKeys.Contains(key) &&
+               (char.IsAsciiLetter(key[0]) || key[0] == '_') &&
+               key.All(character => char.IsAsciiLetterOrDigit(character) || character == '_');
+    }
+
+    private static IReadOnlyDictionary<string, string> ParseEnvironmentDraft(string draft)
+    {
+        var values = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var line in draft.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            if (line.StartsWith('#'))
+            {
+                continue;
+            }
+
+            var separator = line.IndexOf('=');
+            if (separator <= 0)
+            {
+                throw new InvalidOperationException($"Environment entry '{line}' must use KEY=value.");
+            }
+
+            var key = line[..separator].Trim();
+            if (!values.TryAdd(key, line[(separator + 1)..]))
+            {
+                throw new InvalidOperationException($"Environment variable '{key}' is listed more than once.");
+            }
+        }
+
+        return values;
+    }
+
+    private static IReadOnlyList<HomeLabContainerVolumeSetting> ParseVolumeDraft(string draft)
+    {
+        var volumes = new List<HomeLabContainerVolumeSetting>();
+        foreach (var line in draft.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            if (line.StartsWith('#'))
+            {
+                continue;
+            }
+
+            var readOnly = line.EndsWith(":ro", StringComparison.OrdinalIgnoreCase);
+            var mapping = readOnly ? line[..^3] : line;
+            var separator = mapping.IndexOf(':');
+            if (separator <= 0 || separator == mapping.Length - 1)
+            {
+                throw new InvalidOperationException($"Volume mapping '{line}' must use /host/path:/container/path[:ro].");
+            }
+
+            volumes.Add(new HomeLabContainerVolumeSetting(
+                mapping[..separator].Trim(),
+                mapping[(separator + 1)..].Trim(),
+                readOnly));
+        }
+
+        return volumes;
+    }
+
+    private async Task RefreshSummaryNetworkSecurityAsync()
+    {
+        if (workspace is null)
+        {
+            return;
+        }
+
+        var installationIds = workspace.Installations.Select(item => item.Id).ToHashSet();
+        foreach (var staleId in summaryNetworkSecurity.Keys.Where(id => !installationIds.Contains(id)).ToArray())
+        {
+            summaryNetworkSecurity.Remove(staleId);
+        }
+
+        foreach (var installation in workspace.Installations.Where(item => IsVpnRoute(item.NetworkMode)))
+        {
+            try
+            {
+                summaryNetworkSecurity[installation.Id] = await HomeLabService.GetNetworkSecurityAsync(installation.Id);
+            }
+            catch (Exception exception)
+            {
+                summaryNetworkSecurity[installation.Id] = CreateUnavailableNetworkSecurity(installation, exception.Message);
+            }
+
+            StateHasChanged();
+        }
+    }
+
+    private static HomeLabNetworkSecurity CreateUnavailableNetworkSecurity(
+        HomeLabAppInstallation installation,
+        string detail)
+    {
+        var gatewayContainer = installation.NetworkMode.StartsWith("container:", StringComparison.OrdinalIgnoreCase)
+            ? installation.NetworkMode["container:".Length..]
+            : string.Empty;
+        return new HomeLabNetworkSecurity(
+            "UNVERIFIED",
+            true,
+            false,
+            $"VPN Gateway: {gatewayContainer}",
+            gatewayContainer,
+            "Unavailable",
+            null,
+            string.IsNullOrWhiteSpace(detail) ? "LMS could not verify this VPN route." : detail,
+            DateTimeOffset.UtcNow);
+    }
+
+    private HomeLabNetworkSecurity? GetSummaryNetworkSecurity(HomeLabAppInstallation installation) =>
+        summaryNetworkSecurity.TryGetValue(installation.Id, out var security) ? security : null;
+
+    private string GetCompactNetworkState(HomeLabAppInstallation installation)
+    {
+        var security = GetSummaryNetworkSecurity(installation);
+        if (IsVpnGateway(installation))
+        {
+            return "VPN Gateway";
+        }
+
+        return security is null
+            ? IsVpnRoute(installation.NetworkMode) ? "Checking" : "Direct"
+            : security.IsSecured
+                ? "VPN Secured"
+                : security.Status.Equals("DIRECT", StringComparison.OrdinalIgnoreCase)
+                    ? "Direct"
+                    : "VPN Issue";
+    }
+
+    private string GetNetworkRouteLabel(HomeLabAppInstallation installation)
+    {
+        if (!IsVpnRoute(installation.NetworkMode))
+        {
+            return "Direct Internet";
+        }
+
+        var gatewayId = GetGatewayIdFromNetworkMode(installation.NetworkMode);
+        return Guid.TryParse(gatewayId, out var parsedGatewayId)
+            ? InstalledVpnGateways.FirstOrDefault(item => item.Id == parsedGatewayId)?.DisplayName ?? "VPN Gateway"
+            : "VPN Gateway";
+    }
+
+    private UiPillTone GetCompactNetworkTone(HomeLabAppInstallation installation)
+    {
+        var security = GetSummaryNetworkSecurity(installation);
+        if (IsVpnGateway(installation))
+        {
+            return installation.HealthState == HomeLabHealthState.Healthy
+                ? UiPillTone.Success
+                : GetHealthTone(installation.HealthState);
+        }
+
+        if (security is null)
+        {
+            return IsVpnRoute(installation.NetworkMode) ? UiPillTone.Warning : UiPillTone.Neutral;
+        }
+
+        return security.IsSecured
+            ? UiPillTone.Success
+            : security.Status.Equals("DIRECT", StringComparison.OrdinalIgnoreCase)
+                ? UiPillTone.Neutral
+                : UiPillTone.Failure;
+    }
+
+    private async Task ChangeSummaryRouteAsync(HomeLabAppInstallation installation, string? selection)
+    {
+        var value = selection?.Trim() ?? string.Empty;
+        var useVpnGateway = !value.Equals("direct", StringComparison.OrdinalIgnoreCase);
+        Guid? gatewayInstallationId = Guid.TryParse(value, out var parsedGatewayId) ? parsedGatewayId : null;
+        if (useVpnGateway && gatewayInstallationId is null)
+        {
+            return;
+        }
+
+        await RunUiOperationAsync(async () =>
+        {
+            var result = await HomeLabService.SetNetworkRouteAsync(
+                installation.Id,
+                useVpnGateway,
+                gatewayInstallationId);
+            SetMessage($"{result.Summary} {result.Detail}", !result.Succeeded);
+        });
+    }
+
+    private async Task LoadSelectedLogsAsync()
+    {
+        if (selectedInstallation is null || busy)
+        {
+            return;
+        }
+
+        busy = true;
+        try
+        {
+            await LoadSelectedLogsCoreAsync();
+        }
+        finally
+        {
+            busy = false;
+        }
+    }
+
+    private async Task LoadSelectedLogsCoreAsync()
+    {
+        if (selectedInstallation is null)
+        {
+            return;
+        }
+
+        try
+        {
+            var result = await HomeLabService.GetLogsAsync(selectedInstallation.Id);
+            selectedLogs = result.Succeeded
+                ? result.Logs
+                : $"Could not read container logs: {result.Error}";
+            if (!result.Succeeded)
+            {
+                SetMessage(result.Error, true);
+            }
+        }
+        catch (Exception exception)
+        {
+            selectedLogs = $"Could not read container logs: {exception.Message}";
+            SetMessage(exception.Message, true);
+        }
+    }
+
+    private async Task CopyConnectionAddressAsync(HomeLabConnectionAddress connection)
+    {
+        if (!connection.IsReachable || string.IsNullOrWhiteSpace(connection.Url))
+        {
+            return;
+        }
+
+        var copied = await JSRuntime.InvokeAsync<bool>("lmsClipboard.writeText", connection.Url);
+        SetMessage(
+            copied ? $"{connection.TargetName} connection address copied." : "Clipboard access was blocked by the browser.",
+            !copied);
+    }
+
+    private async Task ResetSelectedCredentialsAsync()
+    {
+        if (selectedInstallation is null || busy)
+        {
+            return;
+        }
+
+        await RunUiOperationAsync(async () =>
+        {
+            var result = await HomeLabService.ResetCredentialsAsync(selectedInstallation.Id);
+            SetMessage($"{result.Summary} {result.Detail}", !result.Succeeded);
+            if (result.Succeeded)
+            {
+                var logs = await HomeLabService.GetLogsAsync(selectedInstallation.Id);
+                selectedLogs = logs.Succeeded ? logs.Logs : $"Could not read container logs: {logs.Error}";
+            }
+        });
+    }
+
+    private string? TryGetTemporaryPassword()
+    {
+        if (string.IsNullOrWhiteSpace(selectedLogs))
+        {
+            return null;
+        }
+
+        var lines = selectedLogs.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries);
+        for (var index = lines.Length - 1; index >= 0; index--)
+        {
+            var line = lines[index];
+            var passwordIndex = line.IndexOf("temporary password", StringComparison.OrdinalIgnoreCase);
+            var sessionMarker = "for this session:";
+            var sessionIndex = passwordIndex >= 0
+                ? line.IndexOf(sessionMarker, passwordIndex, StringComparison.OrdinalIgnoreCase)
+                : -1;
+            if (sessionIndex >= 0)
+            {
+                var password = line[(sessionIndex + sessionMarker.Length)..]
+                    .Trim()
+                    .Split([' ', '\t'], StringSplitOptions.RemoveEmptyEntries)
+                    .FirstOrDefault()
+                    ?.TrimEnd('.', '\r');
+                return string.IsNullOrWhiteSpace(password) ? null : password;
+            }
+        }
+
+        return null;
+    }
+
+    private void CancelConfiguration()
+    {
+        configuringApp = null;
+        configuringInstallation = null;
+        configuringTargetGroup = null;
+        configurationValues.Clear();
+        secretConfigurationValues.Clear();
+    }
+
+    private Task BeginVpnReconfiguration() => selectedInstallation is { } gateway
+        ? BeginVpnReconfiguration(gateway) : Task.CompletedTask;
+
+    private async Task BeginVpnReconfiguration(HomeLabAppInstallation gateway)
+    {
+        if (busy || !IsVpnGateway(gateway)) return;
+        busy = true;
+        SetMessage("Loading saved VPN settings…", false);
+        try
+        {
+            var saved = await HomeLabService.GetVpnGatewayConfigurationAsync(gateway.Id);
+            configurationValues.Clear();
+            secretConfigurationValues.Clear();
+            foreach (var field in saved.Configuration) configurationValues[field.Key] = field.Value;
+            foreach (var field in saved.SecretConfiguration) secretConfigurationValues[field.Key] = field.Value;
+            configuringTargetGroup = null;
+            configuringInstallation = gateway;
+            configuringApp = GetApp("vpn-gateway");
+            CloseDetails();
+            SetMessage("Saved VPN settings loaded. Edit the existing configuration below.", false);
+        }
+        catch (Exception exception)
+        {
+            SetMessage(DescribeException(exception), true);
+        }
+        finally { busy = false; }
+    }
+
+    private void BeginGatewayRename(HomeLabAppInstallation gateway)
+    {
+        if (!IsVpnGateway(gateway))
+        {
+            return;
+        }
+
+        renamingGateway = gateway;
+        gatewayRenameValue = gateway.DisplayName;
+        CloseDetails();
+    }
+
+    private bool CanRenameGateway =>
+        renamingGateway is { } gateway &&
+        !string.IsNullOrWhiteSpace(gatewayRenameValue) &&
+        gatewayRenameValue.Trim().Length <= 160 &&
+        !gateway.DisplayName.Equals(gatewayRenameValue.Trim(), StringComparison.Ordinal);
+
+    private void CancelGatewayRename()
+    {
+        renamingGateway = null;
+        gatewayRenameValue = string.Empty;
+    }
+
+    private async Task RenameGatewayAsync()
+    {
+        if (renamingGateway is not { } gateway || !CanRenameGateway)
+        {
+            return;
+        }
+
+        var renamed = false;
+        await RunUiOperationAsync(async () =>
+        {
+            var configuration = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["gateway-name"] = gatewayRenameValue.Trim(),
+                ["configuration-mode"] = "Paste provider config"
+            };
+            var result = await HomeLabService.ReconfigureVpnGatewayAsync(
+                gateway.Id,
+                configuration,
+                new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase));
+            renamed = result.Succeeded;
+            SetMessage($"{result.Summary} {result.Detail}", !result.Succeeded);
+        });
+
+        if (renamed)
+        {
+            CancelGatewayRename();
+        }
+    }
+
+    private bool ShouldShowConfigurationField(HomeLabConfigurationField field)
+    {
+        if (field.Id.Equals("vpn-gateway", StringComparison.OrdinalIgnoreCase))
+        {
+            return GetConfigurationValue("network-route").Equals("VPN Gateway (Gluetun)", StringComparison.OrdinalIgnoreCase);
+        }
+
+        if (configuringApp is null || !configuringApp.Id.Equals("vpn-gateway", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        var setupMode = GetConfigurationValue("configuration-mode");
+        if (field.Id.Equals("vpn-config", StringComparison.OrdinalIgnoreCase))
+        {
+            return setupMode.Equals("Paste provider config", StringComparison.OrdinalIgnoreCase);
+        }
+        if (setupMode.Equals("Paste provider config", StringComparison.OrdinalIgnoreCase) &&
+            !field.Id.Equals("configuration-mode", StringComparison.OrdinalIgnoreCase) &&
+            !field.Id.Equals("protocol", StringComparison.OrdinalIgnoreCase) &&
+            !field.Id.Equals("provider", StringComparison.OrdinalIgnoreCase) &&
+            !field.Id.Equals("port-forwarding", StringComparison.OrdinalIgnoreCase) &&
+            !field.Id.StartsWith("openvpn-", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var protocol = GetConfigurationValue("protocol");
+        if (field.Id.StartsWith("wireguard-", StringComparison.OrdinalIgnoreCase))
+        {
+            return protocol.Equals("WireGuard", StringComparison.OrdinalIgnoreCase);
+        }
+        if (field.Id.StartsWith("openvpn-", StringComparison.OrdinalIgnoreCase))
+        {
+            return protocol.Equals("OpenVPN", StringComparison.OrdinalIgnoreCase);
+        }
+        return true;
+    }
+
+    private string GetConfigurationValue(string key) =>
+        configurationValues.TryGetValue(key, out var value) ? value : string.Empty;
+
+    private string GetSecretConfigurationValue(string key) =>
+        secretConfigurationValues.TryGetValue(key, out var value) ? value : string.Empty;
+
+    private void SetConfigurationValue(string key, string? value, bool secret = false)
+    {
+        var target = secret ? secretConfigurationValues : configurationValues;
+        target[key] = value ?? string.Empty;
+        if (!secret && key.Equals("provider", StringComparison.OrdinalIgnoreCase))
+        {
+            configurationValues["port-forwarding"] = HomeLabVpnPortForwardingPlan.SupportsAutomaticPortForwarding(value)
+                ? HomeLabVpnPortForwardingPlan.RequiredSelection
+                : HomeLabVpnPortForwardingPlan.OffSelection;
+        }
+    }
+
+    private static string GetConfigurationFieldClass(HomeLabConfigurationField field) =>
+        field.Type.Equals("secret-textarea", StringComparison.OrdinalIgnoreCase)
+            ? "home-lab-config-field home-lab-config-field-wide"
+            : "home-lab-config-field";
+
+    private static bool IsVpnRoutingField(HomeLabConfigurationField field) =>
+        field.Id.Equals("network-route", StringComparison.OrdinalIgnoreCase) ||
+        field.Id.Equals("vpn-gateway", StringComparison.OrdinalIgnoreCase);
+
+    private IEnumerable<string> GetConfigurationFieldOptions(HomeLabConfigurationField field)
+    {
+        if (!field.Id.Equals("port-forwarding", StringComparison.OrdinalIgnoreCase) ||
+            HomeLabVpnPortForwardingPlan.SupportsAutomaticPortForwarding(GetConfigurationValue("provider")))
+        {
+            var options = field.Options ?? [];
+            var current = GetConfigurationValue(field.Id);
+            return field.Id.Equals("provider", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(current) && !options.Contains(current)
+                ? options.Concat([current]) : options;
+        }
+
+        return [HomeLabVpnPortForwardingPlan.OffSelection];
+    }
+
+    private string? GetConfigurationFieldHelp(HomeLabConfigurationField field)
+    {
+        if (!field.Id.Equals("port-forwarding", StringComparison.OrdinalIgnoreCase))
+        {
+            return field.Help;
+        }
+
+        var provider = GetConfigurationValue("provider");
+        return HomeLabVpnPortForwardingPlan.SupportsAutomaticPortForwarding(provider)
+            ? field.Help
+            : $"{provider} can carry P2P traffic but does not provide an inbound forwarded port. LMS will install this gateway with incoming port forwarding off; qBittorrent will still work, with reduced inbound peer reachability.";
+    }
+
+    private static HomeLabAppManifest GetApp(string appId) => HomeLabCatalog.GetApp(appId);
+
+    private static string GetEffectiveEnvironmentValue(HomeLabEffectiveContainer container, string key)
+    {
+        var prefix = key + "=";
+        var value = container.Environment
+            .FirstOrDefault(item => item.StartsWith(prefix, StringComparison.OrdinalIgnoreCase));
+        return value is null ? "Not set" : value[prefix.Length..];
+    }
+
+    private static string FormatProvider(string value) =>
+        string.IsNullOrWhiteSpace(value) || value.Equals("custom", StringComparison.OrdinalIgnoreCase)
+            ? "Custom provider configuration"
+            : value;
+
+    private static string FormatProtocol(string value) =>
+        value.Equals("wireguard", StringComparison.OrdinalIgnoreCase)
+            ? "WireGuard"
+            : value.Equals("openvpn", StringComparison.OrdinalIgnoreCase)
+                ? "OpenVPN"
+                : string.IsNullOrWhiteSpace(value) ? "Not set" : value;
+
+    private static bool IsVpnRoute(string networkMode) =>
+        networkMode.StartsWith("container:", StringComparison.OrdinalIgnoreCase);
+
+    private string NextGatewayName()
+    {
+        var existingNames = InstalledVpnGateways
+            .Select(item => item.DisplayName)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        if (!existingNames.Contains("VPN Gateway"))
+        {
+            return "VPN Gateway";
+        }
+
+        for (var suffix = 2; ; suffix++)
+        {
+            var candidate = $"VPN Gateway {suffix}";
+            if (!existingNames.Contains(candidate))
+            {
+                return candidate;
+            }
+        }
+    }
+
+    private string GetGatewayIdFromNetworkMode(string networkMode)
+    {
+        if (!IsVpnRoute(networkMode))
+        {
+            return string.Empty;
+        }
+
+        var containerName = networkMode["container:".Length..];
+        return InstalledVpnGateways.FirstOrDefault(item => item.ContainerName.Equals(containerName, StringComparison.OrdinalIgnoreCase))?.Id.ToString() ?? string.Empty;
+    }
+
+    private static string DescribeHealthCheck(HomeLabAppManifest app)
+    {
+        if (app.HealthCheck is null)
+        {
+            return "Container state fallback";
+        }
+
+        if (!string.IsNullOrWhiteSpace(app.HealthCheck.HttpPath))
+        {
+            return $"HTTP {app.HealthCheck.HttpPath} on port {app.HealthCheck.Port}";
+        }
+
+        if (!string.IsNullOrWhiteSpace(app.HealthCheck.DockerCommand))
+        {
+            return $"Docker command: {app.HealthCheck.DockerCommand}";
+        }
+
+        return "Container state fallback";
+    }
+
+    private async Task RunAsync(Guid installationId, HomeLabLifecycleAction action)
+    {
+        await RunUiOperationAsync(async () =>
+        {
+            var result = await HomeLabService.ExecuteAsync(installationId, action);
+            SetMessage($"{result.Summary} {result.Detail}", !result.Succeeded);
+        });
+    }
+
+    private static string GroupStartupValue(HomeLabInstallationGroup group) =>
+        group.Installations.All(item => item.RestartPolicy == "always") ? "on" : group.Installations.All(item => !item.StartOnBoot) ? "off" : group.Installations.All(item => item.RestartPolicy == "unless-stopped") ? "unless-stopped" : "mixed";
+
+    private Task RunGroupAsync(HomeLabInstallationGroup group, HomeLabLifecycleAction action) => RunUiOperationAsync(async () =>
+    {
+        var result = await HomeLabGroupLifecycleWorkflow.RunAsync(HomeLabService, group.Installations.Select(item => item.Id).ToArray(), action);
+        SetMessage($"{result.Summary} {result.Detail}", !result.Succeeded);
+    });
+
+    private Task SetGroupStartupAsync(HomeLabInstallationGroup group, string value) => RunUiOperationAsync(async () =>
+    {
+        if (value is not ("on" or "off")) return;
+        var result = await HomeLabService.SetStartOnBootAsync(group.Installations.Select(item => item.Id).ToArray(), value == "on");
+        SetMessage($"{result.Summary} {result.Detail}", !result.Succeeded);
+    });
+
+    private async Task RepairGroupAsync(HomeLabInstallationGroup group)
+    {
+        await RunUiOperationAsync(async () =>
+        {
+            var result = await HomeLabGroupRepairWorkflow.RunAsync(HomeLabService, group.Installations.Select(item => item.Id).ToArray());
+            SetMessage($"{result.Summary} {result.Detail}", !result.Succeeded);
+        });
+    }
+
+    private IReadOnlyList<HomeLabAppInstallation> GroupRepairCandidates(HomeLabInstallationGroup group) =>
+        group.Installations.Where(CanRepair).ToArray();
+
+    private async Task HandleContainerActionAsync(HomeLabAppInstallation installation, string? selection)
+    {
+        actionSelectionRevision++;
+        switch (selection?.Trim().ToLowerInvariant())
+        {
+            case "start":
+                await RunAsync(installation.Id, HomeLabLifecycleAction.Start);
+                break;
+            case "stop":
+                await RunAsync(installation.Id, HomeLabLifecycleAction.Stop);
+                break;
+            case "restart":
+                await RunAsync(installation.Id, HomeLabLifecycleAction.Restart);
+                break;
+            case "repair":
+                await RunAsync(installation.Id, HomeLabLifecycleAction.Repair);
+                break;
+            case "update":
+                await RunAsync(installation.Id, HomeLabLifecycleAction.Update);
+                break;
+            case "rename":
+                BeginGatewayRename(installation);
+                break;
+            case "vpn-settings":
+                await BeginVpnReconfiguration(installation);
+                break;
+            case "remove":
+                pendingRemoval = installation;
+                break;
+        }
+    }
+
+    private void CancelRemoval()
+    {
+        if (!busy)
+        {
+            pendingRemoval = null;
+        }
+    }
+
+    private void BeginGroupRemoval(HomeLabInstallationGroup group)
+    {
+        if (!busy && group.Installations.Count > 0 &&
+            group.Installations.All(item => !item.IsExternallyManaged))
+        {
+            pendingGroupRemoval = group;
+        }
+    }
+
+    private void CancelGroupRemoval()
+    {
+        if (!busy)
+        {
+            pendingGroupRemoval = null;
+        }
+    }
+
+    private async Task ConfirmGroupRemovalAsync()
+    {
+        if (pendingGroupRemoval is not { } group || busy)
+        {
+            return;
+        }
+
+        pendingGroupRemoval = null;
+        await RunUiOperationAsync(async () =>
+        {
+            var results = new List<HomeLabOperationResult>(group.Installations.Count);
+            foreach (var installation in group.Installations
+                         .OrderBy(item => IsVpnGateway(item) ? 1 : 0)
+                         .ThenBy(item => item.DisplayName, StringComparer.OrdinalIgnoreCase))
+            {
+                try
+                {
+                    results.Add(await HomeLabService.ExecuteAsync(installation.Id, HomeLabLifecycleAction.Remove));
+                }
+                catch (Exception exception)
+                {
+                    results.Add(new HomeLabOperationResult(false, $"Could not remove {installation.DisplayName}.", exception.Message, [], HomeLabHealthState.Failed, DateTimeOffset.UtcNow));
+                }
+            }
+
+            var failed = results.Count(result => !result.Succeeded);
+            string storageDetail;
+            try
+            {
+                var retained=await HomeLabService.CleanupUnusedStorageAsync(group.Installations.Select(x=>x.ContainerName).ToArray());
+                storageDetail=$" {retained.Count(x=>x.Removed)} unused app folders moved to .lms-retained; all files retained. Protected or still-used paths stayed in place.";
+            }
+            catch(Exception exception) { storageDetail=$" App files were preserved in place. Storage cleanup needs attention: {exception.Message}"; }
+
+            SetMessage(
+                failed == 0
+                    ? $"Deleted group {group.Name} ({results.Count} containers).{storageDetail}"
+                    : $"Deleted {results.Count - failed} of {results.Count} containers in {group.Name}. {results.Last(result => !result.Succeeded).Detail}{storageDetail}",
+                failed > 0);
+        });
+    }
+
+    private async Task ConfirmRemovalAsync()
+    {
+        if (pendingRemoval is not { } installation || busy)
+        {
+            return;
+        }
+
+        pendingRemoval = null;
+        await RunAsync(installation.Id, HomeLabLifecycleAction.Remove);
+    }
+
+    private static bool IsVpnGateway(HomeLabAppInstallation installation) =>
+        installation.AppId.Equals("vpn-gateway", StringComparison.OrdinalIgnoreCase);
+
+    private async Task VerifySecurityAsync()
+    {
+        if (selectedInstallation is null || busy)
+        {
+            return;
+        }
+
+        busy = true;
+        try
+        {
+            networkSecurity = await HomeLabService.GetNetworkSecurityAsync(selectedInstallation.Id);
+            summaryNetworkSecurity[selectedInstallation.Id] = networkSecurity;
+        }
+        catch (Exception exception)
+        {
+            SetMessage(exception.Message, true);
+        }
+        finally
+        {
+            busy = false;
+        }
+    }
+
+    private async Task TestSelectedEndpointAsync()
+    {
+        if (selectedInstallation is null)
+        {
+            return;
+        }
+        await RunUiOperationAsync(async () =>
+        {
+            var endpoints = await HomeLabService.RefreshEndpointHealthAsync(selectedInstallation.Id);
+            var endpoint = endpoints.FirstOrDefault(item => item.Scope == HomeLabEndpointScope.Public);
+            SetMessage(
+                endpoint is null ? "No public endpoint is registered." : endpoint.HealthDetail,
+                endpoint?.HealthState == HomeLabEndpointHealthState.Broken);
+        });
+    }
+
+    private static string DescribeException(Exception exception)
+    {
+        var messages = new List<string>();
+        for (var current = exception; current is not null; current = current.InnerException)
+        {
+            if (!string.IsNullOrWhiteSpace(current.Message) && !messages.Contains(current.Message, StringComparer.Ordinal))
+            {
+                messages.Add(current.Message.Trim());
+            }
+        }
+
+        return string.Join(" -> ", messages);
+    }
+
+    private async Task RunUiOperationAsync(Func<Task> operation)
+    {
+        if (busy) return;
+        busy = true;
+        try
+        {
+            await operation();
+            workspace = await HomeLabService.GetWorkspaceAsync();
+            await RefreshEdgeGatewayStateAsync();
+            await RefreshSummaryNetworkSecurityAsync();
+            if (selectedInstallation is { } openInstallation)
+            {
+                selectedInstallation = workspace.Installations.FirstOrDefault(item => item.Id == openInstallation.Id);
+                if (selectedInstallation is null)
+                {
+                    CloseDetails();
+                }
+                else
+                {
+                    networkSecurity = GetSummaryNetworkSecurity(selectedInstallation);
+                    effectiveConfiguration = await HomeLabService.GetEffectiveConfigurationAsync(selectedInstallation.DeploymentId);
+                    connectionGuide = await HomeLabService.GetConnectionGuideAsync(selectedInstallation.Id);
+                    await LoadExternalAccessDraftAsync(selectedInstallation);
+                    ResetContainerSettingsDraft();
+                    await LoadSelectedLogsCoreAsync();
+                }
+            }
+        }
+        catch (Exception exception)
+        {
+            SetMessage(DescribeException(exception), true);
+        }
+        finally
+        {
+            busy = false;
+        }
+    }
+
+    private async Task LoadExternalAccessDraftAsync(HomeLabAppInstallation installation)
+    {
+        confirmExternalUnpublish = false;
+        if (installation.EdgeGatewayRouteId is Guid routeId)
+        {
+            var editor = await EdgeGatewayService.GetEditorAsync(routeId);
+            if (editor.Id.HasValue)
+            {
+                externalHostnameDraft = editor.Hostname;
+                externalDomainDraft = editor.DomainName;
+                externalAuthModeDraft = editor.AuthMode;
+                return;
+            }
+        }
+
+        var domain = AvailableExternalDomains.FirstOrDefault();
+        externalDomainDraft = domain?.DomainName ?? string.Empty;
+        externalHostnameDraft = string.IsNullOrWhiteSpace(externalDomainDraft)
+            ? installation.AppId
+            : $"{BuildAvailableExternalSubdomain(installation)}.{externalDomainDraft}";
+        externalAuthModeDraft = EdgeGatewayAuthMode.RequireMfa;
+    }
+
+    private async Task RefreshEdgeGatewayStateAsync()
+    {
+        edgeGatewayRoutes = await EdgeGatewayService.ListRoutesAsync();
+        try
+        {
+            edgeGatewayDashboard = await EdgeGatewayService.GetDashboardAsync();
+        }
+        catch
+        {
+            edgeGatewayDashboard = null;
+        }
+    }
+
+    private string BuildAvailableExternalSubdomain(HomeLabAppInstallation installation)
+    {
+        var candidate = installation.AppId.Trim().ToLowerInvariant();
+        var hostname = $"{candidate}.{externalDomainDraft}";
+        var isUsed = edgeGatewayRoutes.Any(route =>
+            route.Id != installation.EdgeGatewayRouteId &&
+            route.Hostname.Equals(hostname, StringComparison.OrdinalIgnoreCase)) == true;
+        return isUsed ? $"{candidate}-{installation.ContainerName[^Math.Min(8, installation.ContainerName.Length)..]}" : candidate;
+    }
+
+    private void ChangeExternalDomain(ChangeEventArgs eventArgs)
+    {
+        var previousDomain = externalDomainDraft;
+        externalDomainDraft = eventArgs.Value?.ToString()?.Trim() ?? string.Empty;
+        if (selectedInstallation is null || string.IsNullOrWhiteSpace(externalDomainDraft))
+        {
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(externalHostnameDraft) ||
+            (!string.IsNullOrWhiteSpace(previousDomain) && externalHostnameDraft.EndsWith($".{previousDomain}", StringComparison.OrdinalIgnoreCase)))
+        {
+            externalHostnameDraft = $"{BuildAvailableExternalSubdomain(selectedInstallation)}.{externalDomainDraft}";
+        }
+    }
+
+    private void ChangeExternalAuthMode(ChangeEventArgs eventArgs)
+    {
+        if (Enum.TryParse<EdgeGatewayAuthMode>(eventArgs.Value?.ToString(), out var mode) &&
+            mode is EdgeGatewayAuthMode.RequireMfa or EdgeGatewayAuthMode.TemporaryIpApproval or EdgeGatewayAuthMode.PassThrough)
+        {
+            externalAuthModeDraft = mode;
+        }
+    }
+
+    private bool CanSaveExternalAccess =>
+        selectedInstallation is not null &&
+        !string.IsNullOrWhiteSpace(externalHostnameDraft) &&
+        !string.IsNullOrWhiteSpace(externalDomainDraft) &&
+        AvailableExternalDomains.Any(domain => domain.DomainName.Equals(externalDomainDraft, StringComparison.OrdinalIgnoreCase));
+
+    private async Task SaveExternalAccessAsync()
+    {
+        if (selectedInstallation is null || !CanSaveExternalAccess)
+        {
+            return;
+        }
+
+        await RunUiOperationAsync(async () =>
+        {
+            var result = await HomeLabService.PublishExternalAccessAsync(
+                selectedInstallation.Id,
+                new HomeLabEdgeGatewayRequest(externalHostnameDraft, externalDomainDraft, externalAuthModeDraft));
+            SetMessage($"{result.Summary} {result.Detail}", !result.Succeeded);
+        });
+    }
+
+    private void RequestExternalUnpublish() => confirmExternalUnpublish = true;
+
+    private void CancelExternalUnpublish() => confirmExternalUnpublish = false;
+
+    private async Task UnpublishExternalAccessAsync()
+    {
+        if (selectedInstallation is null || !confirmExternalUnpublish)
+        {
+            return;
+        }
+
+        await RunUiOperationAsync(async () =>
+        {
+            var result = await HomeLabService.UnpublishExternalAccessAsync(selectedInstallation.Id);
+            SetMessage($"{result.Summary} {result.Detail}", !result.Succeeded);
+            confirmExternalUnpublish = false;
+        });
+    }
+
+    private void SetMessage(string text, bool isError)
+    {
+        message = text;
+        error = isError;
+    }
+
+    private static UiPillTone GetHealthTone(HomeLabHealthState state) => state switch
+    {
+        HomeLabHealthState.Healthy => UiPillTone.Success,
+        HomeLabHealthState.Starting => UiPillTone.Warning,
+        HomeLabHealthState.Stopped => UiPillTone.Neutral,
+        _ => UiPillTone.Failure
+    };
+
+    private bool CanRepair(HomeLabAppInstallation installation)
+    {
+        if (installation.IsExternallyManaged)
+        {
+            return false;
+        }
+        if (installation.HealthState is HomeLabHealthState.Starting or HomeLabHealthState.Degraded or HomeLabHealthState.Failed)
+        {
+            return true;
+        }
+
+        if (installation.HealthState != HomeLabHealthState.Blocked || !IsVpnRoute(installation.NetworkMode))
+        {
+            return false;
+        }
+
+        var gatewayContainer = installation.NetworkMode["container:".Length..];
+        var gateway = InstalledVpnGateways.FirstOrDefault(item =>
+            item.ContainerName.Equals(gatewayContainer, StringComparison.OrdinalIgnoreCase));
+        return gateway?.HealthState is HomeLabHealthState.Healthy or HomeLabHealthState.Degraded or HomeLabHealthState.Failed;
+    }
+
+    private EdgeGatewayRouteListItem? GetExternalRoute(HomeLabAppInstallation installation) =>
+        installation.EdgeGatewayRouteId is Guid routeId
+            ? edgeGatewayRoutes.FirstOrDefault(route => route.Id == routeId)
+            : null;
+
+    private bool IsEdgeGatewaySession
+    {
+        get
+        {
+            if (!Uri.TryCreate(Navigation.BaseUri, UriKind.Absolute, out var baseUri))
+            {
+                return false;
+            }
+
+            return edgeGatewayRoutes.Any(route =>
+                route.Enabled &&
+                route.Hostname.Trim().TrimEnd('.').Equals(baseUri.Host.Trim().TrimEnd('.'), StringComparison.OrdinalIgnoreCase)) == true;
+        }
+    }
+
+    private string? BuildOpenUrl(HomeLabAppInstallation installation)
+    {
+        var endpoints = installation.ServiceEndpoints ?? [];
+        var primaryPortName = GetApp(installation.AppId).Ports
+            .FirstOrDefault(port => port.Primary)?.Name
+            ?? GetApp(installation.AppId).Ports.FirstOrDefault()?.Name;
+        bool IsPrimary(HomeLabServiceEndpoint endpoint) =>
+            primaryPortName is null || endpoint.PortName.Equals(primaryPortName, StringComparison.OrdinalIgnoreCase);
+        if (IsEdgeGatewaySession)
+        {
+            return endpoints.FirstOrDefault(endpoint =>
+                endpoint.Scope == HomeLabEndpointScope.Public &&
+                IsPrimary(endpoint) &&
+                endpoint.EdgeGatewayRouteId.HasValue &&
+                endpoint.Scheme.Equals("https", StringComparison.OrdinalIgnoreCase)) is { } endpoint ? HomeLabBrowserUrl.Resolve(endpoint.Url, installation.BrowserEntry) : null;
+        }
+
+        // A local LMS session should stay on the host/LAN route even when this
+        // installation also has a published Edge Gateway endpoint. The Client
+        // record is intentionally shared with the public route after publishing.
+        var lanEndpoint = endpoints.FirstOrDefault(endpoint =>
+            endpoint.Scope == HomeLabEndpointScope.Lan && IsPrimary(endpoint));
+        if (lanEndpoint is not null)
+        {
+            return HomeLabBrowserUrl.Resolve(lanEndpoint.Url, installation.BrowserEntry);
+        }
+
+        var clientEndpoint = endpoints.FirstOrDefault(endpoint =>
+            endpoint.Scope == HomeLabEndpointScope.Client &&
+            IsPrimary(endpoint) &&
+            !endpoint.EdgeGatewayRouteId.HasValue);
+        return clientEndpoint is null ? null : HomeLabBrowserUrl.Resolve(clientEndpoint.Url, installation.BrowserEntry);
+    }
+
+    private static string? BuildExternalUrl(EdgeGatewayRouteListItem route)
+    {
+        if (string.IsNullOrWhiteSpace(route.Hostname))
+        {
+            return null;
+        }
+
+        var path = route.TargetPathPrefix?.Trim() ?? string.Empty;
+        if (path.Length > 0 && !path.StartsWith("/", StringComparison.Ordinal))
+        {
+            path = $"/{path}";
+        }
+        return $"https://{route.Hostname.Trim().TrimEnd('.')}{path}";
+    }
+
+    private string BuildExternalPreview()
+    {
+        var hostname = externalHostnameDraft.Trim().TrimEnd('.');
+        if (hostname.Length > 0 && !hostname.Contains('.', StringComparison.Ordinal) && !string.IsNullOrWhiteSpace(externalDomainDraft))
+        {
+            hostname = $"{hostname}.{externalDomainDraft.Trim().Trim('.')}";
+        }
+        return hostname.Length == 0 ? "Choose a hostname" : $"https://{hostname}";
+    }
+
+    private static string FormatExternalAuthMode(EdgeGatewayAuthMode mode) => mode switch
+    {
+        EdgeGatewayAuthMode.PassThrough => "Pass through to the app",
+        EdgeGatewayAuthMode.TemporaryIpApproval => "Email approve IP",
+        _ => "LMS MFA / passkey"
+    };
+
+}
