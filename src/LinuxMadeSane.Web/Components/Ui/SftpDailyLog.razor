@@ -1,0 +1,96 @@
+@* Copyright (c) 2026 LMS Developer. All rights reserved.
+   Applicable licence and release scope: see LICENSE.md for details. *@
+@using LinuxMadeSane.Infrastructure.Stores
+@using LinuxMadeSane.Core.Models.SftpServer
+@inject IServiceScopeFactory Scopes
+
+<div class="daily-log">
+    <div class="toolbar-row">
+        <label>Log date (UTC)
+            <input type="date" class="ui-control-input" @bind:get="day" @bind:set="ChangeDayAsync"
+                   min="@Iso(Today.AddDays(-1))" max="@Iso(Today)" disabled="@loading" />
+        </label>
+        <span class="meta-text">Last 24 hours</span>
+        @if (pages.Count > 0 || hasOlder)
+        {
+            <UiCommandButton Label="Newer" Disabled="@(loading || pages.Count == 0)" OnClick="NewerAsync" />
+            <UiCommandButton Label="Older" Disabled="@(loading || !hasOlder)" OnClick="OlderAsync" />
+        }
+    </div>
+    @if (loading) { <span role="status">Reading log…</span> }
+    else if (error)
+    {
+        <div role="alert">Could not read this log. <button type="button" @onclick="LoadAsync">Retry</button></div>
+    }
+    else if (entries.Count == 0) { <p class="meta-text">No events on this date.</p> }
+    else
+    {
+        <div class="log-lines" tabindex="0" role="region" aria-label="SFTP audit log">
+            @foreach (var entry in entries)
+            {
+                <details @key="entry.Id">
+                    <summary title="@entry.Summary">
+                        <time>@entry.CreatedAtUtc.UtcDateTime.ToString("HH:mm:ss")</time>
+                        <span class="@(entry.Success ? "ok" : "failed")">@(entry.Success ? "OK" : "Failed")</span>
+                        <span class="message">@entry.Summary</span>
+                    </summary>
+                    <div class="detail"><strong>@entry.EventType</strong> · @entry.TargetType · @entry.TargetKey
+                        @if (!string.IsNullOrWhiteSpace(entry.Details)) { <pre>@entry.Details</pre> }
+                    </div>
+                </details>
+            }
+        </div>
+    }
+</div>
+
+@code {
+    [Parameter] public string? Username { get; set; }
+    private static DateOnly Today => DateOnly.FromDateTime(DateTime.UtcNow);
+    private static string Iso(DateOnly date) => date.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture);
+    private DateOnly day = Today;
+    private IReadOnlyList<SftpAuditEntry> entries = [];
+    private SftpAuditEntry? before;
+    private readonly Stack<SftpAuditEntry?> pages = new();
+    private bool loading, error, hasOlder;
+
+    protected override Task OnInitializedAsync() => LoadAsync();
+
+    private Task ChangeDayAsync(DateOnly value)
+    {
+        if (value < Today.AddDays(-1) || value > Today) return Task.CompletedTask;
+        day = value;
+        pages.Clear();
+        before = null;
+        return LoadAsync();
+    }
+
+    private Task OlderAsync()
+    {
+        if (loading || !hasOlder) return Task.CompletedTask;
+        pages.Push(before);
+        before = entries[^1];
+        return LoadAsync();
+    }
+
+    private Task NewerAsync()
+    {
+        if (loading || !pages.TryPop(out before)) return Task.CompletedTask;
+        return LoadAsync();
+    }
+
+    private async Task LoadAsync()
+    {
+        loading = true;
+        error = false;
+        hasOlder = false;
+        try
+        {
+            await using var scope = Scopes.CreateAsyncScope();
+            var result = await scope.ServiceProvider.GetRequiredService<SqliteSftpServerStore>().ReadDailyAuditAsync(day, Username, before);
+            entries = result.Take(SqliteSftpServerStore.AuditPageSize).ToArray();
+            hasOlder = result.Count > entries.Count;
+        }
+        catch (Microsoft.Data.Sqlite.SqliteException) { error = true; }
+        finally { loading = false; }
+    }
+}

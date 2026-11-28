@@ -1,0 +1,46 @@
+// Copyright (c) 2026 LMS Developer. All rights reserved.
+// Applicable licence and release scope: see LICENSE.md for details.
+
+using LinuxMadeSane.Application.Contracts.MailRelay;
+using LinuxMadeSane.Core.Models.MailRelay;
+
+namespace LinuxMadeSane.Application.Interfaces;
+
+public interface IMailRelayService
+{
+    Task<MailRelayDashboardViewModel> GetDashboardAsync(CancellationToken cancellationToken = default);
+    Task<MailRelayPreflightResult> InspectPreflightAsync(
+        string? cloudflareZoneId,
+        CancellationToken cancellationToken = default);
+    Task<MailRelayPreflightResult> RunPreflightAsync(
+        string? cloudflareZoneId = null,
+        CancellationToken cancellationToken = default);
+    Task<MailRelaySetupPreview> PreviewSetupAsync(
+        MailRelaySetupRequest request,
+        CancellationToken cancellationToken = default);
+    Task<MailRelayProvisioningJobSnapshot> StartProvisioningAsync(
+        MailRelaySetupRequest request,
+        CancellationToken cancellationToken = default);
+    Task<MailRelayTestResult> SendTestAsync(
+        MailRelayTestRequest request,
+        CancellationToken cancellationToken = default);
+    Task<MailRelayConfiguration> SavePublicIpMonitorSettingsAsync(
+        MailRelayPublicIpMonitorSettingsRequest request,
+        CancellationToken cancellationToken = default);
+    Task<MailRelayPublicIpSyncResult> CheckPublicIpNowAsync(
+        CancellationToken cancellationToken = default);
+    string GenerateClientPassword();
+    Task<MailRelayClientSaveResult> SaveClientAsync(
+        MailRelayClientSaveRequest request,
+        CancellationToken cancellationToken = default);
+    Task<MailRelayLegacySubmissionResult> ConfigureLegacySubmissionAsync(
+        MailRelayLegacySubmissionRequest request,
+        IProgress<string>? progress = null,
+        CancellationToken cancellationToken = default);
+    Task<MailRelayRemovalResult> RemoveAsync(
+        MailRelayRemovalRequest request,
+        IProgress<string>? progress = null,
+        CancellationToken cancellationToken = default);
+    MailRelayProvisioningJobSnapshot? GetProvisioningJob(Guid jobId);
+    MailRelayProvisioningJobSnapshot? GetLatestProvisioningJob();
+}

@@ -1,0 +1,523 @@
+@* Copyright (c) 2026 LMS Developer. All rights reserved.
+   Applicable licence and release scope: see LICENSE.md for details. *@
+@using LinuxMadeSane.Infrastructure.Services
+@using LinuxMadeSane.Application.Interfaces
+@using LinuxMadeSane.Application.Contracts.HomeLab
+@inject LocalContainerService Containers
+
+<section class="surface-card stack-list" aria-label="Local containers">
+    <p class="helper-text">LMS provides basic controls for containers on this host. Full Docker management is outside its scope. For day-to-day administration, use a dedicated Docker manager such as Portainer or Dockge.</p>
+    <div class="toolbar-row container-toolbar">
+        <label>Find containers <input @bind="search" @bind:event="oninput" placeholder="Name, image, state or IP" /></label>
+        <UiIconButton Label="Refresh containers" Glyph="UiIconGlyph.Refresh" Disabled="@Busy" OnClick="RefreshAsync" />
+        <UiButton Size="UiButtonSize.Medium" Variant="UiButtonVariant.PrimaryMuted" Title="Install container"
+                  Disabled="@(Busy || status != DockerAvailability.Ready)" OnClick="OpenInstall">
+            <Icon><UiGlyphIcon Glyph="UiIconGlyph.Plus" /></Icon>
+            <ChildContent>Install container</ChildContent>
+        </UiButton>
+    </div>
+    @if (installing)
+    {
+        <UiModal IsOpen="true" Title="Install container" Class="container-install-modal" OnClose="CloseInstall">
+            <ChildContent>
+                <div class="container-form">
+                    <label>Paste Docker install command
+                        <textarea class="ui-control-input" rows="4" spellcheck="false" autocomplete="off"
+                                  placeholder="docker run -d --name web -p 8080:80 nginx:alpine"
+                                  value="@installScript" @oninput="ReadInstallCommand" disabled="@Busy"></textarea>
+                    </label>
+                    @if (importError != null) { <span class="callout warning" role="status">@importError</span> }
+                    <details><summary>Container settings</summary>@EditFields</details>
+                </div>
+            </ChildContent>
+            <Footer>@FormActions</Footer>
+        </UiModal>
+    }
+    @if (deleting is { } target)
+    {
+        <UiModal IsOpen="true" Title="@($"Delete {target.Container.Name}?")" Class="container-delete-modal" OnClose="CloseDelete">
+            <ChildContent><p>This removes the container and its writable layer. Mounted files and volumes are kept.</p></ChildContent>
+            <Footer><div class="toolbar-row">
+                <UiCommandButton Label="Delete container" Glyph="UiIconGlyph.Delete" Variant="UiButtonVariant.Danger" Disabled="@Busy" OnClick="DeleteAsync" />
+                <UiCommandButton Label="Cancel" Glyph="UiIconGlyph.Clear" Disabled="@Busy" OnClick="CloseDelete" />
+                @Feedback
+            </div></Footer>
+        </UiModal>
+    }
+    @if (selectedId == null && !installing) { @Feedback }
+    @if (status is DockerAvailability.Missing)
+    { <p class="callout warning">Docker is missing. Install Docker on the local host through the <a href="@($"/hosts/{LinuxMadeSane.Core.Models.Ai.AiLocalMachine.ManagedHostId}/terminal")">local host terminal</a>, then refresh.</p> }
+    @if (status is DockerAvailability.Stopped)
+    { <p class="callout warning">The Docker daemon is unavailable. <a href="/services">Open Services</a> to start Docker.</p> }
+    @if (status is DockerAvailability.Denied)
+    { <p class="callout warning">Docker denied the LMS runner access. Review <a href="/settings?tab=remote-access-users">host administrator access</a>.</p> }
+    @if (status is DockerAvailability.Failed)
+    { <p class="callout warning">Docker inventory could not be read. <a href="/services">Check the Docker service</a> and refresh.</p> }
+    @if (status == DockerAvailability.Ready)
+    {
+        <div class="table-scroll"><table class="inventory-table container-table">
+            <thead><tr><th>Container / image</th><th>State</th><th>Container IPs</th><th>Published ports</th><th>Owner</th><th>Actions</th></tr></thead>
+            <tbody>
+            @foreach (var row in Filtered)
+            {
+                var item = row.Container;
+                var mappings = item.Bindings.DistinctBy(p => (p.HostPort, p.ContainerPort, p.Protocol)).ToList();
+                <tr @key="item.Id" class="container-summary" @onclick="() => ToggleRow(row)"><td>
+                    <button type="button" class="inventory-name-button container-name" disabled="@Busy" aria-expanded="@(expanded == item.Id ? "true" : "false")"
+                        @onclick:stopPropagation @onclick="() => ToggleRow(row)"><span aria-hidden="true">@(expanded == item.Id ? "▾" : "▸")</span> @item.Name</button><small class="meta-text container-image" title="@item.Image">@item.Image</small></td>
+                    <td><span class="status-pill @StateStyle(item.State)">@StateLabel(item.State)</span>
+                        @if (item.State == "restarting") { <small class="meta-text container-image">Docker is retrying after exit.</small> }
+                        else if (item.ManualStartup) { <small class="meta-text container-image">Manual start only</small> }
+                    </td>
+                    <td class="container-addresses" @onclick:stopPropagation>
+                        @if (item.Addresses.Count > 0)
+                        {
+                            @Address(item.Addresses[0])
+                            @if (item.Addresses.Count > 1)
+                            {
+                                <details><summary>+@(item.Addresses.Count - 1) more</summary>
+                                    @foreach (var address in item.Addresses.Skip(1)) { @Address(address) }
+                                </details>
+                            }
+                        }
+                        else
+                        {
+                            <span class="meta-text">@(item.NetworkMode == "host" ? "Host network" :
+                                item.NetworkMode.StartsWith("container:", StringComparison.Ordinal) ? "Shared network namespace" : "None assigned")</span>
+                        }
+                    </td>
+                    <td>
+                        @if (mappings.Count == 0) { <span>None</span> }
+                        else
+                        {
+                            var first = mappings[0];
+                            var summary = mappings.Count == 1 ? $"{first.HostPort} → {first.ContainerPort}/{first.Protocol}" : $"{mappings.Count} port mappings";
+                            <button class="port-toggle" disabled="@Busy" type="button" aria-expanded="@(showingPorts && expanded == item.Id ? "true" : "false")"
+                                aria-label="@($"{summary}, {(expanded == item.Id && showingPorts ? "hide" : "show")} details for {item.Name}")"
+                                @onclick:stopPropagation @onclick="() => TogglePorts(row)">
+                                @summary <span aria-hidden="true">@(showingPorts && expanded == item.Id ? "▴" : "▾")</span>
+                            </button>
+                        }
+                    </td>
+                    <td>@row.Owner</td><td>
+                    @if (row.CanControl || row.CanOperateComposeContainer)
+                    {
+                        <div class="container-actions" @onclick:stopPropagation>
+                            @if (item.Running || item.State == "restarting")
+                            { <UiCommandButton Label="Stop" Glyph="UiIconGlyph.Stop" Disabled="@Busy" OnClick="@(() => Act(row, ContainerAction.Stop))" /> }
+                            else if (!row.NeedsHomeLabRecovery)
+                            { <UiIconButton Label="Start" Glyph="UiIconGlyph.Run" Disabled="@Busy" OnClick="@(() => Act(row, ContainerAction.Start))" /> }
+                            @if (!row.NeedsHomeLabRecovery)
+                            { <UiIconButton Label="Restart" Glyph="UiIconGlyph.Restart" Disabled="@Busy" OnClick="@(() => Act(row, ContainerAction.Restart))" /> }
+                            <UiIconButton Label="Recent logs" Glyph="UiIconGlyph.TextFile" Disabled="@Busy" OnClick="@(() => Act(row, ContainerAction.Logs))" />
+                            @if (row.CanControl)
+                            {
+                                @if (!item.ManualStartup || item.Running || item.State == "restarting")
+                                { <UiCommandButton Label="Disable" Glyph="UiIconGlyph.Interrupt" Disabled="@Busy" OnClick="@(() => DisableAsync(row))" /> }
+                                <UiCommandButton Label="Edit configuration" Glyph="UiIconGlyph.Edit" Disabled="@Busy" OnClick="@(() => OpenConfiguration(row))" />
+                                <UiCommandButton Label="Delete" Glyph="UiIconGlyph.Delete" Disabled="@Busy" OnClick="@(() => AskDelete(row))" />
+                                @if (row.Owner == "Home Lab" || row.CanEdit)
+                                { <UiIconButton Label="Edit container" Glyph="UiIconGlyph.Edit" Disabled="@Busy" OnClick="@(() => EditContainerAsync(row))" /> }
+                                @if (row.Owner == "Home Lab" || row.CanEdit)
+                                { <UiIconButton Label="Startup and disable settings" Glyph="UiIconGlyph.Interrupt" Disabled="@Busy" OnClick="@(() => OpenStartup(row))" /> }
+                                else
+                                { <UiIconButton Label="Edit container startup" Glyph="UiIconGlyph.Edit" Disabled="@Busy" OnClick="@(() => OpenStartup(row))" /> }
+                                @if (row.CanEdit && row.Owner == "Home Lab")
+                                { <UiIconButton Label="Edit ports" Glyph="UiIconGlyph.NetworkMount" Disabled="@Busy" OnClick="@(() => OpenPorts(row))" /> }
+                            }
+                        </div>
+                    }
+                    else { <span>@(row.Owner.StartsWith("Interrupted") ? "Recover in Docker" : "Use the external manager")</span> }
+                    @if (selectedId == item.Id && editing == null && startup == null) { @Feedback }
+                    </td></tr>
+                @if (expanded == item.Id && !showingPorts)
+                {
+                    <tr><td colspan="6"><section class="inline-editor" aria-label="@($"Container details for {item.Name}")">
+                        @if (showConfiguration) { <ContainerConfigEditor @key="item.Id" ContainerId="@item.Id" /> }
+                        else if (startup != null) { @StartupForm }
+                        else if (editing != null) { @EditForm }
+                        else if (showHomeLab) { @HomeLabEditor?.Invoke(item.Name) }
+                        else if (logs != null) { <pre class="container-log">@logs</pre> }
+                        else if (row.CanOperateComposeContainer) { <p>Start, stop and restart affect only <strong>@item.Name</strong>. The Compose file for <strong>@item.ComposeProject</strong> defines its image, ports and volumes.</p> }
+                        else if (!row.CanControl) { <p>Managed by @row.Owner. Change settings in that management workflow.</p> }
+                    </section></td></tr>
+                }
+                @if (expanded == item.Id && showingPorts)
+                {
+                    <tr><td colspan="6"><div class="port-details" tabindex="0" role="region" aria-label="@($"Published ports for {item.Name}")">
+                        <table><thead><tr><th>Listening on</th><th>Host port</th><th>Container port</th><th>Protocol</th></tr></thead>
+                        <tbody>@foreach (var binding in item.Bindings.OrderBy(p => p.HostPort).ThenBy(p => p.Address))
+                        {
+                            <tr><td>@ListenLabel(binding.Address)</td><td>@binding.HostPort</td><td>@binding.ContainerPort</td><td>@binding.Protocol.ToUpperInvariant()</td></tr>
+                        }</tbody></table>
+                    </div></td></tr>
+                }
+
+            }
+            </tbody></table></div>
+        @if (!Filtered.Any()) { <p class="meta-text">No matching containers.</p> }
+    }
+</section>
+@code {
+    private static RenderFragment Address(DockerNetworkAddress address) => @<div>
+        <span class="container-ip">@address.Address</span><small class="meta-text container-image">@address.Network</small>
+    </div>;
+
+    private RenderFragment StartupForm => @<div>
+        @if (startup is { } current)
+        {
+            <div class="container-form">
+                @if (startupRow?.Container.HomeLabLabel == true && !current.HomeLab)
+                { <p>The Home Lab installation record is missing.</p> }
+                @if (current.NeedsRecovery)
+                { <p>Restore the app through <a href="/home-lab/apps?tab=apps">Home Lab</a> before starting it so LMS can verify its network settings.</p> }
+                @if (current.State == "restarting" || current.RestartCount > 0 || current.State == "exited")
+                {
+                    <p>Docker restarts: @current.RestartCount.ToString("N0"). Last exit code: @current.ExitCode.
+                        @(current.OutOfMemory ? "Docker reports an out-of-memory kill." : current.State == "restarting" && current.ExitCode == 0 ? "The process finished normally and Docker started it again." : "")
+                        Use Recent logs in this row for the application's output.</p>
+                }
+                @if (current.ConfigMounts.Count > 0)
+                { <div><UiCommandButton Label="Edit configuration files" Glyph="UiIconGlyph.Edit" OnClick="() => OpenConfiguration(startupRow!)" /></div> }
+                <label>Startup and recovery
+                    <select class="ui-control-input" @bind="startupChoice" disabled="@Busy">
+                        <option value="no">Manual start only</option>
+                        <option value="always" disabled="@(current.NeedsRecovery && current.Policy != "always")">Always restart automatically</option>
+                        @if (!current.HomeLab || current.Policy == "unless-stopped")
+                        { <option value="unless-stopped" disabled="@(current.NeedsRecovery && current.Policy != "unless-stopped")">Restart automatically unless manually stopped</option> }
+                        @if (!current.HomeLab || current.Policy == "on-failure")
+                        { <option value="on-failure" disabled="@(current.NeedsRecovery && current.Policy != "on-failure")">Restart after an error</option> }
+                        @if (current.Policy.StartsWith("on-failure:"))
+                        { <option value="@current.Policy">Restart after an error (up to @current.Policy.Split(':')[1] retries)</option> }
+                        <option value="disable">Disable — stop now and turn off automatic restarts</option>
+                    </select>
+                </label>
+                @if (startupChoice == "disable")
+                { <p>Saving stops this container and keeps it stopped after Docker restarts.</p> }
+                <div class="toolbar-row"><UiCommandButton Label="Save startup settings" Glyph="UiIconGlyph.Save" Disabled="@Busy" OnClick="SaveStartup" />@Feedback</div>
+            </div>
+        }
+    </div>;
+    private RenderFragment EditForm => @<div>
+        <h3>@(editDetails ? "Container settings" : "Edit ports")</h3>
+        @EditFields
+        @FormActions
+    </div>;
+    private RenderFragment EditFields => @<fieldset disabled="@Busy" class="container-form">
+        @if (installing || editDetails)
+        {
+            <div class="field-pair">
+                <label>Public image <input @bind="image" @bind:event="oninput" placeholder="nginx:alpine" /></label>
+                @if (installing)
+                {
+                    <label>Container name <input @bind="name" @bind:event="oninput" placeholder="web" /></label>
+                }
+            </div>
+            @if (installing)
+            {
+                <label class="policy-field">Restart policy <select @bind="installRestart">
+                    <option value="no">Manual start only</option><option value="unless-stopped">Unless stopped</option>
+                    <option value="always">Always</option><option value="on-failure">On failure</option>
+                    @if (installRestart.StartsWith("on-failure:")) { <option value="@installRestart">@installRestart</option> }
+                </select></label>
+            }
+        }
+        @foreach (var port in ports)
+        {
+            <div class="binding mapping-fields" @key="port">
+                <label>Host port <input type="number" min="1" max="65535" @bind="port.Host" /></label>
+                <label>Container port <input type="number" min="1" max="65535" disabled="@HomeLabEdit" @bind="port.Target" /></label>
+                <label>Protocol <select disabled="@HomeLabEdit" @bind="port.Protocol"><option>tcp</option><option>udp</option></select></label>
+                <label>Listen address <select disabled="@(HomeLabEdit && editing!.NetworkConfigurable?.Contains((port.Target,port.Protocol)) != true)" @bind="port.Address">
+                    <option value="127.0.0.1">Localhost (127.0.0.1)</option>
+                    <option value="0.0.0.0">Network (all IPv4 interfaces)</option>
+                    @foreach (var nic in Interfaces.Where(i => i.Address != "127.0.0.1").DistinctBy(i => i.Address))
+                    { <option value="@nic.Address">@nic.InterfaceName (@nic.Address)</option> }
+                    @if (port.Address is not ("0.0.0.0" or "127.0.0.1") && !Interfaces.Any(i => i.Address == port.Address))
+                    { <option value="@port.Address">@port.Address</option> }
+                </select></label>
+                @if (!HomeLabEdit)
+                { <UiIconButton Label="Remove mapping" Glyph="UiIconGlyph.Delete" OnClick="@(() => ports.Remove(port))" /> }
+            </div>
+        }
+        @if (!HomeLabEdit)
+        { <div class="form-add"><UiCommandButton Size="UiButtonSize.Medium" Label="Add port mapping" Glyph="UiIconGlyph.Plus" OnClick="@(() => ports.Add(new()))" /></div> }
+        @if (installing || editDetails)
+        {
+            <details open="@editDetails"><summary>Environment and storage</summary><div class="container-form">
+                @foreach (var entry in environment)
+                {
+                    <div class="binding variable-fields" @key="entry"><label>Variable <input disabled="@entry.Saved" @bind="entry.Key" /></label>
+                        <label>Value <input type="password" placeholder="@(entry.Saved ? "Leave blank to keep saved value" : null)" autocomplete="new-password" @bind="entry.Value" /></label>
+                        <UiIconButton Label="Remove variable" Glyph="UiIconGlyph.Delete" OnClick="@(() => environment.Remove(entry))" /></div>
+                }
+                <div class="form-add"><UiCommandButton Size="UiButtonSize.Medium" Label="Add environment variable" Glyph="UiIconGlyph.Plus" OnClick="@(() => environment.Add(new()))" /></div>
+                <div class="field-pair">
+                    <label>Named data volume <input @bind="volume" placeholder="web-data" /></label>
+                    <label>Mount inside container <input @bind="mount" placeholder="/data" /></label>
+                </div>
+                @if (installing && volume.Length > 0)
+                { <label><input type="checkbox" @bind="volumeReadOnly" /> Read-only volume</label> }
+                @foreach (var extra in additionalVolumes) { <code>@extra.Binding</code> }
+            </div></details>
+        }
+        @if (!installing)
+        {
+            <p>The replacement gets a fresh writable layer. Files in mounted storage survive.</p>
+            @if (editing?.Container.Running == true)
+            { <label><input type="checkbox" @bind="confirmed" /> Allow a brief interruption to save these changes.</label> }
+        }
+        </fieldset>;
+    private RenderFragment FormActions => @<div class="toolbar-row"><UiCommandButton Size="UiButtonSize.Medium" Label="@(installing ? "Install and start" : editDetails ? "Save changes" : "Save ports")" Glyph="@(installing ? UiIconGlyph.Run : UiIconGlyph.Save)" Variant="UiButtonVariant.PrimaryMuted"
+            Disabled="@(Busy || installing && (importError != null || string.IsNullOrWhiteSpace(image) || string.IsNullOrWhiteSpace(name)) || editing?.Container.Running == true && !confirmed)" OnClick="SaveAsync" /><UiCommandButton Size="UiButtonSize.Medium" Label="Cancel" Glyph="UiIconGlyph.Clear" Disabled="@Busy" OnClick="ResetDetails" />@Feedback</div>;
+    [Parameter] public RenderFragment<string>? HomeLabEditor { get; set; }
+    [Parameter] public bool ParentBusy { get; set; }
+    private bool Busy => busy || ParentBusy;
+    private bool showingPorts, showHomeLab, showConfiguration;
+    private void ResetDetails()
+    {
+        selectedId = expanded = logs = null;
+        ClearImport();
+        deleting = null;
+        startup = null;
+        startupRow = editing = null;
+        showConfiguration = showingPorts = showHomeLab = installing = editDetails = false;
+        environment.Clear();
+        ports.Clear();
+        message = "";
+    }
+    private Task ToggleRow(ContainerRow row)
+    {
+        if (Busy) return Task.CompletedTask;
+        if (expanded == row.Container.Id) { ResetDetails(); return Task.CompletedTask; }
+        if (row.CanControl) return OpenStartup(row);
+        SelectRow(row);
+        return Task.CompletedTask;
+    }
+    private void SelectRow(ContainerRow row)
+    {
+        ResetDetails();
+        expanded = selectedId = row.Container.Id;
+    }
+    private void TogglePorts(ContainerRow row)
+    {
+        bool close = showingPorts && expanded == row.Container.Id;
+        ResetDetails();
+        if (!close) { SelectRow(row); showingPorts = true; }
+    }
+
+    private sealed class Port { public int Host { get; set; } public int Target { get; set; } public string Protocol { get; set; } = "tcp"; public string Address { get; set; } = "127.0.0.1"; }
+    private sealed class Variable { public bool Saved { get; init; } public string Key { get; set; } = ""; public string Value { get; set; } = ""; }
+    private readonly List<Port> ports = [];
+    private readonly List<Variable> environment = [];
+    [Parameter] public IReadOnlyList<HomeLabRecipeListenInterface> Interfaces { get; set; } = [];
+    [Parameter] public EventCallback<string> OnEditHomeLab { get; set; }
+    private bool editDetails;
+    private List<ContainerRow> rows = [];
+    private DockerAvailability? status;
+    private string search = "", image = "", name = "", volume = "", mount = "", message = "";
+    private string? selectedId, logs, expanded;
+    private static string StateLabel(string state) => state switch
+    {
+        "exited" => "Stopped",
+        "" => "Unknown",
+        _ => char.ToUpperInvariant(state[0]) + state[1..]
+    };
+    private static string StateStyle(string state) => state switch
+    {
+        "running" => "success",
+        "paused" or "restarting" => "warning",
+        "dead" => "failure",
+        _ => "neutral"
+    };
+    private string ListenLabel(string address) => address switch
+    {
+        "0.0.0.0" => "All IPv4 interfaces",
+        "::" => "All IPv6 interfaces",
+        "127.0.0.1" or "::1" => $"Localhost ({address})",
+        _ => Interfaces.FirstOrDefault(i => i.Address == address) is { } nic ? $"{nic.InterfaceName} ({address})" : address
+    };
+    private ContainerRow? editing;
+    private bool installing, confirmed, busy, error;
+    private bool HomeLabEdit => editing?.Owner == "Home Lab";
+    private IEnumerable<ContainerRow> Filtered => rows.Where(r => string.Join(' ', r.Container.Name, r.Container.Image, StateLabel(r.Container.State), r.Container.State, r.Owner).Contains(search, StringComparison.OrdinalIgnoreCase) ||
+        r.Container.Addresses.Any(a => a.Address.Contains(search, StringComparison.OrdinalIgnoreCase)));
+    private RenderFragment Feedback => @<span role="status" class="@(error ? "callout warning" : "meta-text")">@message</span>;
+    protected override Task OnInitializedAsync() => RefreshAsync();
+    private async Task LoadAsync() => (status, rows) = await Containers.ListAsync();
+    public async Task RefreshHomeLabEditorAsync(string name)
+    {
+        if (!showHomeLab) return;
+        await LoadAsync();
+        expanded = selectedId = rows.FirstOrDefault(row => row.Container.Name == name)?.Container.Id;
+        await InvokeAsync(StateHasChanged);
+    }
+    private Task RefreshAsync() { ResetDetails(); return Work("Reading containers…", async () => { await LoadAsync(); message = ""; }); }
+    private ContainerRow? deleting;
+    private string installScript = "", installRestart = "unless-stopped";
+    private string? importError;
+    private IReadOnlyList<string> installCommand = [];
+    private IReadOnlyList<ContainerVolume> additionalVolumes = [];
+    private bool volumeReadOnly;
+    private void ClearImport()
+    {
+        installScript = "";
+        installRestart = "unless-stopped";
+        importError = null;
+        installCommand = [];
+        additionalVolumes = [];
+        volumeReadOnly = false;
+    }
+    private void ReadInstallCommand(ChangeEventArgs e)
+    {
+        installScript = e.Value?.ToString() ?? "";
+        importError = null;
+        message = "";
+        image = name = volume = mount = "";
+        ports.Clear();
+        environment.Clear();
+        installCommand = [];
+        additionalVolumes = [];
+        volumeReadOnly = false;
+        installRestart = "unless-stopped";
+        if (string.IsNullOrWhiteSpace(installScript)) return;
+        try
+        {
+            var draft = DockerInstallCommand.Parse(installScript);
+            image = draft.Image; name = draft.Name; volume = draft.Volume; mount = draft.MountPath;
+            additionalVolumes = draft.AdditionalVolumes;
+            volumeReadOnly = draft.VolumeReadOnly;
+            installRestart = draft.RestartPolicy;
+            installCommand = draft.Command;
+            ports.AddRange(draft.Ports.Select(p => new Port { Host = p.HostPort, Target = p.ContainerPort, Address = p.Address, Protocol = p.Protocol }));
+            environment.AddRange(draft.Environment.Select(v => new Variable { Key = v.Key, Value = v.Value }));
+        }
+        catch (InvalidOperationException ex) { importError = ex.Message; }
+    }
+    private void CloseInstall() { if (!Busy) ResetDetails(); }
+    private void AskDelete(ContainerRow row) { SelectRow(row); deleting = row; }
+    private void CloseDelete() { if (!Busy) ResetDetails(); }
+    private Task DeleteAsync() => Work("Deleting container…", async () =>
+    {
+        var row = deleting!;
+        var result = await Containers.ActAsync(row.Container.Id, ContainerAction.Delete);
+        ResetDetails();
+        message = result;
+        await LoadAsync();
+    });
+    private Task DisableAsync(ContainerRow row)
+    {
+        SelectRow(row);
+        return Work("Disabling container…", async () =>
+        {
+            var current = await Containers.GetStartupAsync(row.Container.Id);
+            await Containers.SetStartupAsync(row.Container.Id, current.Policy, "no", true);
+            await LoadAsync();
+            message = "Stopped. Automatic restarts are off.";
+        });
+    }
+    private void OpenInstall()
+    {
+        ResetDetails(); installing = true; image = name = volume = mount = message = "";
+        environment.Clear(); ports.Clear(); error = false;
+    }
+    private void OpenPorts(ContainerRow row)
+    {
+        SelectRow(row); editing = row; confirmed = false; message = ""; error = false; ports.Clear();
+        ports.AddRange(row.Container.Bindings.Select(p => new Port { Host = p.HostPort, Target = p.ContainerPort, Address = p.Address, Protocol = p.Protocol }));
+    }
+    private ContainerStartup? startup;
+    private ContainerRow? startupRow;
+    private string startupChoice = "";
+    private void OpenConfiguration(ContainerRow row)
+    {
+        SelectRow(row);
+        showConfiguration = true;
+    }
+    private Task OpenStartup(ContainerRow row)
+    {
+        SelectRow(row);
+        return Work("Reading startup settings…", async () =>
+        {
+            startup = await Containers.GetStartupAsync(row.Container.Id);
+            startupRow = row;
+            startupChoice = startup.Policy;
+            message = "";
+        });
+    }
+    private Task SaveStartup() => Work("Saving startup settings…", async () =>
+    {
+        var disable = startupChoice == "disable";
+        await Containers.SetStartupAsync(startupRow!.Container.Id, startup!.Policy, disable ? "no" : startupChoice, disable);
+        expanded = null; startup = null;
+        startupRow = null;
+        await LoadAsync();
+        message = disable ? "Stopped. Automatic restarts are off." : "Startup settings saved.";
+    });
+
+    private Task EditContainerAsync(ContainerRow row)
+    {
+        SelectRow(row);
+        return Work("Opening settings…", async () =>
+        {
+            if (row.Owner == "Home Lab")
+            {
+                await OnEditHomeLab.InvokeAsync(row.Container.Name);
+                showHomeLab = true;
+                message = "";
+                return;
+            }
+            var draft = await Containers.GetSettingsAsync(row.Container.Id);
+            OpenPorts(row);
+            editDetails = true;
+            image = draft.Image;
+            volume = draft.Volume;
+            mount = draft.MountPath;
+            environment.Clear();
+            environment.AddRange(draft.EnvironmentKeys.Select(key => new Variable { Key = key, Saved = true }));
+        });
+    }
+
+    private Task Act(ContainerRow row, ContainerAction action)
+    {
+        SelectRow(row); if (action != ContainerAction.Logs) expanded = null;
+        return Work(action == ContainerAction.Logs ? "Reading logs…" : $"{action} in progress…", async () =>
+        {
+            var result = await Containers.ActAsync(row.Container.Id, action);
+            if (action == ContainerAction.Logs) { logs = result; message = "Recent logs"; }
+            else { message = result; await LoadAsync(); }
+        });
+    }
+    private Task SaveAsync() => Work(installing ? "Pulling image and starting container…" : "Applying changes…", async () =>
+    {
+        var bindings = ports.Select(p => new DockerPortBinding(p.Host,p.Target,p.Protocol,p.Address)).ToList();
+        var target = installing ? name : editing!.Container.Name;
+        if (environment.GroupBy(v => v.Key).Any(g => g.Count() > 1)) throw new InvalidOperationException("Enter each variable name once.");
+        if (installing)
+        {
+            if (importError != null) throw new InvalidOperationException(importError);
+            await Containers.InstallAsync(new(name,image,environment.ToDictionary(v => v.Key,v => v.Value),volume,mount,bindings)
+                { RestartPolicy = installRestart, Command = installCommand, VolumeReadOnly = volumeReadOnly, AdditionalVolumes = additionalVolumes });
+            ClearImport();
+        }
+        else if (editDetails)
+        {
+            var values = environment.ToDictionary(v => v.Key, v => v.Saved && v.Value.Length == 0 ? null : v.Value);
+            await Containers.EditPortsAsync(editing!.Container.Id, bindings, confirmed, new(image, values, volume, mount));
+        }
+        else await Containers.EditPortsAsync(editing!.Container.Id, bindings, confirmed);
+        message = installing ? "Container installed and started." : editDetails ? "Container updated." : "Port mappings saved.";
+        expanded = null; installing = false; editing = null; environment.Clear(); selectedId = null;
+        await LoadAsync(); selectedId = rows.FirstOrDefault(r => r.Container.Name == target)?.Container.Id;
+    });
+    private async Task Work(string progress, Func<Task> work)
+    {
+        if (busy) return;
+        busy = true; error = false; message = progress; await InvokeAsync(StateHasChanged);
+        try { await work(); }
+        catch (UnauthorizedAccessException) { status = null; rows.Clear(); selectedId = null; message = "LMS host administrator access is required."; error = true; }
+        catch (InvalidOperationException ex) { message = ex.Message; error = true; }
+        catch { message = "The operation failed. Refresh the container list and check the Docker service."; error = true; }
+        finally { busy = false; }
+    }
+}

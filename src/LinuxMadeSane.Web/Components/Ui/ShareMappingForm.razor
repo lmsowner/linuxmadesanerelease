@@ -1,0 +1,832 @@
+@* Copyright (c) 2026 LMS Developer. All rights reserved.
+   Applicable licence and release scope: see LICENSE.md for details. *@
+
+@using LinuxMadeSane.Application.Contracts.Shares
+@using LinuxMadeSane.Application.Interfaces
+@using LinuxMadeSane.Core.Models.Shares
+@inject IShareManagementService ShareService
+
+<div class="share-mapping-form">
+    <SavedCredentialPicker @ref="credentialPicker" @key="Editor" ShowAddButton="true" AddRequested="AddMountCredentialsAsync" InitialSelectionId="InitialCredentialId" SmbOnly="true" SavedOnly="@Editor.PersistOnServer" Selected="ApplySavedCredentialAsync" Cleared="ClearSavedCredentialAsync" Disabled="@IsBusy" />
+    <p class="meta-text">Temporary connections can use the credentials entered above. Permanent shares require saved credentials so LMS can reconnect after reboot.</p>
+    @if (Editor.PersistOnServer && selectedCredentialId is null)
+    { <p class="callout info" role="status">Choose saved credentials above before creating a permanent share.</p> }
+    @if (!ReviewAtEnd) { @MappingSummary }
+
+    <div class="share-mapping-share-entry">
+        <UiTextField Label="Remote SMB share" Helper="Share name on the server selected above."
+                     Value="@Editor.ShareName" ValueChanged="SetShareNameAsync" ValueExpression="@(() => Editor.ShareName)"
+                     Compact="true" Class="@ShareFieldClass" Placeholder="media" Disabled="@IsBusy" />
+        @if (EnableRemoteShareDiscovery)
+        {
+            <UiCommandButton Label="@(isBrowsingRemoteShares ? "Loading shares..." : "Find shares")"
+                             Glyph="UiIconGlyph.Search" Disabled="@(!CanBrowseRemoteShares)" OnClick="BrowseRemoteSharesAsync" />
+        }
+    </div>
+
+    @if (EnableRemoteShareDiscovery && RemoteShares.Count > 0)
+    {
+        <section class="share-mapping-remote-picker">
+            <label for="share-mapping-remote-share">Available shares</label>
+            <select id="share-mapping-remote-share"
+                    class="ui-control-input"
+                    value="@Editor.ShareName"
+                    @onchange="SelectRemoteShareByNameAsync">
+                <option value="">Choose a share...</option>
+                @foreach (var share in RemoteShares)
+                {
+                    <option value="@share.Name">@share.Name@(string.IsNullOrWhiteSpace(share.Comment) ? string.Empty : $" — {share.Comment}")</option>
+                }
+            </select>
+        </section>
+    }
+
+    @if (EnableRemoteShareDiscovery && !string.IsNullOrWhiteSpace(remoteShareBrowseError))
+    {
+        <p class="callout error share-mapping-share-error">@remoteShareBrowseError</p>
+    }
+
+    @if (HasRemoteSource)
+    {
+        <section class="share-mapping-remote-browser">
+            <div class="share-mapping-section-header">
+                <div>
+                    <strong>Subfolder inside the remote share</strong>
+                    <span>/ maps the whole share. Otherwise, only this subfolder is mapped.</span>
+                </div>
+            </div>
+            <UiPathCombobox Value="@RemotePathInput"
+                            ValueChanged="SetRemotePathInputAsync"
+                            CommitRequested="CommitRemotePathInputAsync"
+                            SuggestionSelected="SelectRemotePathSuggestionAsync"
+                            Suggestions="@RemotePathSuggestions"
+                            Placeholder="Enter a folder path"
+                            AriaLabel="Remote share folder path"
+                            Title="Path inside the selected SMB share"
+                            PrefixText="@RemoteSharePrefix"
+                            PrefixTitle="Selected SMB share"
+                            IsLoadingSuggestions="@isBrowsingRemoteFolders"
+                            EscapeValue="@RemotePathInput" />
+            <span class="meta-text">@remoteFolderBrowseResult?.StatusMessage</span>
+        </section>
+    }
+
+    @RemoteFolderDetails
+
+    <section class="share-mapping-location">
+        <div class="share-mapping-section-header">
+            <div>
+                <strong>Local folder on LMS</strong>
+                <span>The remote contents appear here. Existing local contents are hidden while mounted.</span>
+            </div>
+            @if (ShowPersistenceToggle)
+            {
+                <UiSwitchField Label="Permanent"
+                               Title="Permanent mounts are saved so they survive reboot."
+                               Value="@Editor.PersistOnServer"
+                               ValueChanged="SetPersistenceAsync"
+                               Compact="true" />
+            }
+        </div>
+
+        <div class="share-mapping-local-target">
+            <UiTextField Label="Local mount folder"
+                         Helper="Absolute path on this LMS server."
+                         Value="@Editor.LocalMountPath"
+                         ValueChanged="SetLocalMountPathAsync"
+                         ValueExpression="@(() => Editor.LocalMountPath)"
+                         Compact="true"
+                         Class="@MountPathFieldClass" />
+        </div>
+
+        @if (CanBrowseTargetFolders)
+        {
+            <div class="toolbar-row share-mapping-folder-actions">
+                <UiCommandButton Label="Browse target folders"
+                                 Glyph="UiIconGlyph.FolderOpen"
+                                 Variant="UiButtonVariant.Ghost"
+                                 OnClick="OpenTargetFolderBrowser" />
+            </div>
+        }
+
+    </section>
+
+    <details class="share-mapping-advanced">
+        <summary>Advanced mount options · path presets and Linux permissions</summary>
+        <div class="share-mapping-grid">
+            <UiComboboxField TValue="ShareMappingMountLocation"
+                           Label="Path preset"
+                           Value="@selectedLocation"
+                           ValueChanged="SetLocationAsync"
+                           ValueExpression="@(() => selectedLocation)"
+                           Compact="true">
+                <option value="@ShareMappingMountLocation.LmsDefault">LMS default: /mnt/lms</option>
+                <option value="@ShareMappingMountLocation.MntFolder">Standard /mnt</option>
+                @if (!string.IsNullOrWhiteSpace(PreferredMountPath))
+                {
+                    <option value="@ShareMappingMountLocation.SelectedFolder">Selected folder</option>
+                }
+                <option value="@ShareMappingMountLocation.HomeFolder">User home</option>
+                <option value="@ShareMappingMountLocation.Custom">Custom</option>
+            </UiComboboxField>
+
+            @if (selectedLocation == ShareMappingMountLocation.HomeFolder)
+            {
+                <UiTextField Label="Linux user"
+                             Helper="Used only to build the home-folder path."
+                             Value="@localUserName"
+                             ValueChanged="SetLocalUserNameAsync"
+                             ValueExpression="@(() => localUserName)"
+                             Compact="true" />
+            }
+
+        </div>
+    <section class="share-mapping-location">
+        <div class="share-mapping-section-header">
+            <div>
+                <strong>Linux presentation</strong>
+                <span>Controls how CIFS presents ownership and permissions on this LMS server.</span>
+            </div>
+        </div>
+
+        <div class="share-mapping-grid">
+            <UiTextField Label="Linux owner"
+                         Helper="Local Linux user or numeric uid. This becomes uid/gid for the CIFS mount."
+                         Value="@Editor.LocalOwner"
+                         ValueChanged="SetLocalOwnerAsync"
+                         ValueExpression="@(() => Editor.LocalOwner)"
+                         Compact="true"
+                                      Placeholder="linuxuser" />
+
+            <UiTextField Label="File mode"
+                         Helper="Client-side file mode. Use 0777 for open local access."
+                         Value="@Editor.FileMode"
+                         ValueChanged="SetFileModeAsync"
+                         ValueExpression="@(() => Editor.FileMode)"
+                         Compact="true"
+                         Class="@RequiredModeFieldClass(Editor.FileMode)"
+                         Placeholder="0777" />
+
+            <UiTextField Label="Directory mode"
+                         Helper="Client-side directory mode. Use 0777 for open local access."
+                         Value="@Editor.DirectoryMode"
+                         ValueChanged="SetDirectoryModeAsync"
+                         ValueExpression="@(() => Editor.DirectoryMode)"
+                         Compact="true"
+                         Class="@RequiredModeFieldClass(Editor.DirectoryMode)"
+                         Placeholder="0777" />
+        </div>
+    </section>
+
+    </details>
+
+    @if (ReviewAtEnd) { @MappingSummary }
+    @ReviewContent
+
+    @if (!string.IsNullOrWhiteSpace(StatusMessage))
+    {
+        <p class="callout @StatusTone share-mapping-status">@StatusMessage</p>
+    }
+
+    <div class="toolbar-row share-mapping-actions">
+        <UiCommandButton Label="@SubmitLabel"
+                         Glyph="UiIconGlyph.NetworkMount"
+                         Disabled="@(!CanSubmit)"
+                         OnClick="SubmitAsync" />
+    </div>
+</div>
+
+@if (targetFolderBrowserOpen && FolderPickerHostId is Guid folderPickerHostId)
+{
+    <UiModal IsOpen="true"
+             Title="Choose mount target folder"
+             Subtitle="Select the local folder that should become the network mount point."
+             Class="share-mapping-folder-browser-modal"
+             OnClose="CloseTargetFolderBrowser">
+        <HostFileBrowserWorkspace @key="folderPickerHostId"
+                                  HostId="@folderPickerHostId"
+                                  RootPath="/"
+                                  InitialPath="@TargetFolderBrowserInitialPath"
+                                  Title="Select mount target folder"
+                                  AllowPopout="false"
+                                  FolderSelected="SelectTargetFolderAsync"
+                                  FolderSelectLabel="Use this folder" />
+    </UiModal>
+}
+
+@if (credentialEditorRequested || credentialEditor is not null)
+{ <SavedCredentialsPanel @ref="credentialEditor" EditorOnly="true" Saved="MountCredentialSavedAsync" /> }
+
+@code {
+    [Parameter] public RenderFragment? RemoteFolderDetails { get; set; }
+    [Parameter] public RenderFragment? ReviewContent { get; set; }
+    [Parameter] public bool ReviewAtEnd { get; set; }
+    private RenderFragment MappingSummary => @<section class="share-mapping-route" aria-label="Mount mapping">
+        <div class="share-mapping-endpoint">
+            <span>From · remote server / share / subfolder</span>
+            <strong>@RemoteSummary</strong>
+        </div>
+        <span class="share-mapping-direction" aria-hidden="true">→</span>
+        <div class="share-mapping-endpoint">
+            <span>To · local folder on LMS</span>
+            <strong>@(string.IsNullOrWhiteSpace(Editor.LocalMountPath) ? "Choose a local folder" : Editor.LocalMountPath)</strong>
+        </div>
+    </section>;
+
+    [Parameter, EditorRequired] public RemoteShareMountEditor Editor { get; set; } = new();
+    [Parameter] public string? PreferredMountPath { get; set; }
+    [Parameter] public string? LocalUserName { get; set; }
+    [Parameter] public string? StatusMessage { get; set; }
+    [Parameter] public string StatusTone { get; set; } = "info";
+    [Parameter] public bool CanCreateMounts { get; set; } = true;
+    [Parameter] public bool IsBusy { get; set; }
+    [Parameter] public string TemporarySubmitLabel { get; set; } = "Mount temporarily and browse";
+    [Parameter] public string PermanentSubmitLabel { get; set; } = "Create permanent mount";
+    [Parameter] public string BusyLabel { get; set; } = "Creating mount...";
+    [Parameter] public string SourceLabel { get; set; } = "Selected SMB share";
+    [Parameter] public string SourceHelper { get; set; } = "Server and share were filled from the share you selected.";
+    [Parameter] public bool ShowPersistenceToggle { get; set; } = true;
+    [Parameter] public bool PreferLmsDefaultMountPath { get; set; }
+    [Parameter] public bool ShowSavedPasswordToggle { get; set; }
+    [Parameter] public bool EnableRemoteShareDiscovery { get; set; }
+    [Parameter] public Guid? FolderPickerHostId { get; set; }
+    [Parameter] public EventCallback<bool> OnCreateMount { get; set; }
+
+    private SavedCredentialPicker? credentialPicker;
+    private SavedCredentialsPanel? credentialEditor;
+    private bool credentialEditorRequested;
+    private Task AddMountCredentialsAsync()
+    {
+        if (credentialEditor is not null) return OpenMountCredentialEditorAsync();
+        credentialEditorRequested = true;
+        return Task.CompletedTask;
+    }
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (credentialEditorRequested && credentialEditor is not null)
+        { credentialEditorRequested = false; await OpenMountCredentialEditorAsync(); }
+    }
+    private Task OpenMountCredentialEditorAsync() => credentialEditor?.OpenCreateAsync(Editor.Target, Editor.Target, 445, ConnectionCredentialKind.Smb,
+        Editor.UserName, Editor.Password, Editor.Domain) ?? Task.CompletedTask;
+    private Task MountCredentialSavedAsync(SavedConnectionCredentialSummary saved) => credentialPicker?.SelectCreatedAsync(saved.Id) ?? Task.CompletedTask;
+    [Parameter] public Guid? InitialCredentialId { get; set; }
+    private Guid? selectedCredentialId;
+
+    private Task ClearSavedCredentialAsync()
+    {
+        selectedCredentialId = null;
+        Editor.UserName = ""; Editor.Password = ""; Editor.Domain = "";
+        Editor.KeepSavedPassword = false;
+        ResetRemoteShareBrowseState();
+        return Task.CompletedTask;
+    }
+
+    private Task ApplySavedCredentialAsync(SavedConnectionCredential credential)
+    {
+        var saved = credential.Summary;
+        selectedCredentialId = saved.Id;
+        var sameServer = Editor.Target.Trim().Equals(saved.Server, StringComparison.OrdinalIgnoreCase);
+        if (!sameServer) Editor.ShareName = "";
+        Editor.Target = saved.Server;
+        Editor.UserName = saved.Username;
+        Editor.Password = credential.Password;
+        Editor.Domain = saved.Domain;
+        Editor.KeepSavedPassword = false;
+        ResetRemoteShareBrowseState(clearRemotePath: !sameServer);
+        ApplySelectedMountPathIfAutomatic();
+        return Task.CompletedTask;
+    }
+
+    private RemoteShareMountEditor? trackedEditor;
+    private ShareMappingMountLocation selectedLocation = ShareMappingMountLocation.LmsDefault;
+    private string localUserName = string.Empty;
+    private bool mountPathEdited;
+    private bool localOwnerEdited;
+    private bool isBrowsingRemoteShares;
+    private bool isBrowsingRemoteFolders;
+    private bool targetFolderBrowserOpen;
+    private string remotePathInput = "/";
+    private RemoteShareBrowseResult? remoteShareBrowseResult;
+    private RemoteShareFolderBrowseResult? remoteFolderBrowseResult;
+    private string? remoteShareBrowseError;
+    private bool HasRemoteSource => !string.IsNullOrWhiteSpace(Editor.Target) &&
+                                    !string.IsNullOrWhiteSpace(Editor.ShareName);
+    private bool CanBrowseTargetFolders => FolderPickerHostId.HasValue && !IsBusy;
+    private bool CanBrowseRemoteShares => EnableRemoteShareDiscovery &&
+                                          !IsBusy &&
+                                          !isBrowsingRemoteShares &&
+                                          selectedCredentialId.HasValue &&
+                                          !string.IsNullOrWhiteSpace(Editor.Target);
+    private IReadOnlyList<RemoteSambaShare> RemoteShares => remoteShareBrowseResult?.Shares
+        .Where(share => share.IsMountable)
+        .ToArray() ?? Array.Empty<RemoteSambaShare>();
+    private IReadOnlyList<RemoteSambaFolder> RemoteFolders => remoteFolderBrowseResult?.Folders
+        ?? Array.Empty<RemoteSambaFolder>();
+    private string RemotePathInput => string.IsNullOrWhiteSpace(remotePathInput) ? "/" : remotePathInput;
+    private IReadOnlyList<string> RemotePathSuggestions => RemoteFolders
+        .Select(folder => $"/{folder.Path.Trim('/')}")
+        .Where(path => path != "/")
+        .ToArray();
+    private string RemoteSharePrefix => $"//{Editor.Target.Trim()}/{Editor.ShareName.Trim()}";
+    private string ShareFieldClass =>
+        $"{RequiredFieldClass(Editor.ShareName)}{(string.IsNullOrWhiteSpace(remoteShareBrowseError) ? string.Empty : " share-mapping-share-invalid")}";
+    private string TargetFolderBrowserInitialPath =>
+        !string.IsNullOrWhiteSpace(PreferredMountPath)
+            ? PreferredMountPath.Trim()
+            : "/";
+    private string MountPathFieldClass => $"share-mapping-mount-path {RequiredFieldClass(Editor.LocalMountPath)}";
+    private string RemoteSummary =>
+        string.IsNullOrWhiteSpace(Editor.Target) || string.IsNullOrWhiteSpace(Editor.ShareName)
+            ? "Choose a saved server and its share"
+            : $"//{Editor.Target.Trim()}/{Editor.ShareName.Trim()}{(string.IsNullOrWhiteSpace(Editor.RemotePath) ? string.Empty : $"/{Editor.RemotePath.Trim('/')}")}";
+
+    private string LocalSummary =>
+        string.IsNullOrWhiteSpace(Editor.LocalMountPath)
+            ? "Choose a Linux mount path."
+            : $"Mounted at {Editor.LocalMountPath.Trim()}";
+
+    private string SubmitLabel => IsBusy
+        ? BusyLabel
+        : Editor.PersistOnServer
+            ? PermanentSubmitLabel
+            : TemporarySubmitLabel;
+    private string ResolvedPasswordHelper => Editor.HasSavedPassword
+        ? Editor.KeepSavedPassword
+            ? "Leave blank to keep the current saved password. Type a new password to replace it."
+            : "Type a new password, or leave it blank to clear the saved password."
+        : "Optional. Stored only when creating a permanent mount.";
+
+    private string LocationAdvice => selectedLocation switch
+    {
+        ShareMappingMountLocation.SelectedFolder => "Only mount over an existing folder when you intentionally want that folder to become the share entry point.",
+        ShareMappingMountLocation.MntFolder => "Standard Linux temporary/manual mount location.",
+        ShareMappingMountLocation.HomeFolder => "Good for a user-specific convenience mount, not a shared system mount.",
+        ShareMappingMountLocation.Custom => "Use a custom absolute path only when you already have a naming convention.",
+        _ => "Recommended LMS default for network share mappings."
+    };
+
+    private string MountPathHelper => selectedLocation switch
+    {
+        ShareMappingMountLocation.SelectedFolder => "The selected folder will become the mount point. Existing contents are hidden while mounted.",
+        ShareMappingMountLocation.MntFolder => "Plain /mnt path. Good for temporary/admin-style mounts.",
+        ShareMappingMountLocation.HomeFolder => "A user-scoped convenience path under /home.",
+        ShareMappingMountLocation.Custom => "Must be an absolute Linux path.",
+        _ => "Recommended: /mnt/lms/<machine>/<share>."
+    };
+
+    private bool CanSubmit =>
+        CanCreateMounts &&
+        (!Editor.PersistOnServer || selectedCredentialId.HasValue) &&
+        !IsBusy &&
+        !string.IsNullOrWhiteSpace(Editor.Target) &&
+        !string.IsNullOrWhiteSpace(Editor.ShareName) &&
+        !string.IsNullOrWhiteSpace(Editor.LocalMountPath) &&
+        IsValidCifsMode(Editor.FileMode) &&
+        IsValidCifsMode(Editor.DirectoryMode) &&
+        Path.IsPathRooted(Editor.LocalMountPath);
+
+    protected override void OnParametersSet()
+    {
+        if (!ReferenceEquals(Editor, trackedEditor))
+        {
+            trackedEditor = Editor;
+            selectedCredentialId = null;
+            localUserName = string.IsNullOrWhiteSpace(LocalUserName)
+                ? ResolveDefaultLocalUserName()
+                : LocalUserName.Trim();
+            selectedLocation = !string.IsNullOrWhiteSpace(Editor.LocalMountPath)
+                ? InferLocation(Editor.LocalMountPath)
+                : !string.IsNullOrWhiteSpace(PreferredMountPath)
+                    ? ShareMappingMountLocation.SelectedFolder
+                    : PreferLmsDefaultMountPath ? ShareMappingMountLocation.LmsDefault : ShareMappingMountLocation.MntFolder;
+            mountPathEdited = selectedLocation == ShareMappingMountLocation.Custom &&
+                              !string.IsNullOrWhiteSpace(Editor.LocalMountPath);
+            localOwnerEdited = !string.IsNullOrWhiteSpace(Editor.LocalOwner) &&
+                               !Editor.LocalOwner.Trim().Equals(localUserName, StringComparison.Ordinal);
+            remotePathInput = NormalizeRemotePathInput(Editor.RemotePath);
+        }
+
+        if (string.IsNullOrWhiteSpace(Editor.LocalMountPath) && !mountPathEdited)
+        {
+            ApplySelectedMountPath();
+        }
+
+        if (string.IsNullOrWhiteSpace(Editor.LocalOwner))
+        {
+            Editor.LocalOwner = localUserName;
+            localOwnerEdited = false;
+        }
+
+        if (string.IsNullOrWhiteSpace(Editor.FileMode))
+        {
+            Editor.FileMode = "0777";
+        }
+
+        if (string.IsNullOrWhiteSpace(Editor.DirectoryMode))
+        {
+            Editor.DirectoryMode = "0777";
+        }
+    }
+
+    private Task SetTargetAsync(string? value)
+    {
+        Editor.Target = value ?? string.Empty;
+        ResetRemoteShareBrowseState();
+        ApplySelectedMountPathIfAutomatic();
+        return Task.CompletedTask;
+    }
+
+    private Task SetShareNameAsync(string? value)
+    {
+        Editor.ShareName = value ?? string.Empty;
+        ResetRemoteShareBrowseState();
+        ApplySelectedMountPathIfAutomatic();
+        return Task.CompletedTask;
+    }
+
+    private Task SetUserNameAsync(string? value)
+    {
+        Editor.UserName = value ?? string.Empty;
+        ResetRemoteShareBrowseState(clearRemotePath: false);
+        return Task.CompletedTask;
+    }
+
+    private Task SetPasswordAsync(string? value)
+    {
+        Editor.Password = value ?? string.Empty;
+        if (!string.IsNullOrWhiteSpace(Editor.Password))
+        {
+            Editor.KeepSavedPassword = false;
+        }
+
+        ResetRemoteShareBrowseState(clearRemotePath: false);
+
+        return Task.CompletedTask;
+    }
+
+    private Task SetKeepSavedPasswordAsync(bool value)
+    {
+        Editor.KeepSavedPassword = value;
+        if (value)
+        {
+            Editor.Password = string.Empty;
+        }
+
+        ResetRemoteShareBrowseState(clearRemotePath: false);
+
+        return Task.CompletedTask;
+    }
+
+    private async Task BrowseRemoteSharesAsync()
+    {
+        if (!CanBrowseRemoteShares)
+        {
+            return;
+        }
+
+        isBrowsingRemoteShares = true;
+        remoteShareBrowseResult = null;
+        remoteShareBrowseError = null;
+
+        try
+        {
+            remoteShareBrowseResult = await ShareService.BrowseRemoteSharesAsync(new RemoteShareConnectionEditor
+            {
+                Target = Editor.Target.Trim(),
+                UserName = Editor.UserName.Trim(),
+                Password = Editor.Password,
+                Domain = Editor.Domain.Trim()
+            });
+
+            if (RemoteShares.Count == 0 &&
+                (remoteShareBrowseResult.RequiresAuthentication ||
+                 !remoteShareBrowseResult.StatusMessage.StartsWith("Connected to", StringComparison.OrdinalIgnoreCase)) &&
+                !remoteShareBrowseResult.StatusMessage.Contains("unavailable", StringComparison.OrdinalIgnoreCase))
+            {
+                remoteShareBrowseError = "Hostname and/or credentials incorrect.";
+            }
+
+            if (RemoteShares.FirstOrDefault(IsSelectedRemoteShare) is { } selectedShare)
+            {
+                await SelectRemoteShareAsync(selectedShare);
+            }
+        }
+        catch
+        {
+            remoteShareBrowseError = "Hostname and/or credentials incorrect.";
+        }
+        finally
+        {
+            isBrowsingRemoteShares = false;
+        }
+    }
+
+    private async Task SelectRemoteShareAsync(RemoteSambaShare share)
+    {
+        if (!Editor.ShareName.Equals(share.Name, StringComparison.OrdinalIgnoreCase))
+        {
+            Editor.RemotePath = string.Empty;
+            remotePathInput = "/";
+        }
+        Editor.ShareName = share.Name;
+        remoteShareBrowseError = null;
+        ApplySelectedMountPathIfAutomatic();
+        await BrowseRemoteShareFoldersAsync();
+    }
+
+    private async Task SelectRemoteShareByNameAsync(ChangeEventArgs args)
+    {
+        var shareName = args.Value?.ToString()?.Trim() ?? string.Empty;
+        if (RemoteShares.FirstOrDefault(share => share.Name.Equals(shareName, StringComparison.OrdinalIgnoreCase)) is { } share)
+        {
+            await SelectRemoteShareAsync(share);
+            return;
+        }
+
+        Editor.ShareName = shareName;
+        Editor.RemotePath = string.Empty;
+        remotePathInput = "/";
+        remoteFolderBrowseResult = null;
+        ApplySelectedMountPathIfAutomatic();
+    }
+
+    private async Task BrowseRemoteShareFoldersAsync()
+    {
+        if (!EnableRemoteShareDiscovery ||
+            string.IsNullOrWhiteSpace(Editor.Target) ||
+            string.IsNullOrWhiteSpace(Editor.ShareName))
+        {
+            return;
+        }
+
+        isBrowsingRemoteFolders = true;
+        try
+        {
+            remoteFolderBrowseResult = await ShareService.BrowseRemoteShareFoldersAsync(
+                new RemoteShareFolderBrowseRequest(
+                    Editor.Target.Trim(),
+                    Editor.ShareName.Trim(),
+                    Editor.RemotePath.Trim(),
+                    Editor.UserName.Trim(),
+                    Editor.Password,
+                    Editor.Domain.Trim()));
+            remoteShareBrowseError = null;
+        }
+        catch
+        {
+            remoteFolderBrowseResult = null;
+            remoteShareBrowseError = "Unable to browse folders in this share.";
+        }
+        finally
+        {
+            isBrowsingRemoteFolders = false;
+        }
+    }
+
+    private Task SetRemotePathInputAsync(string? value)
+    {
+        remotePathInput = value ?? "/";
+        Editor.RemotePath = NormalizeRemotePathInput(value).Trim('/');
+        return Task.CompletedTask;
+    }
+
+    private Task CommitRemotePathInputAsync(string? value)
+    {
+        return NavigateRemotePathAsync(value);
+    }
+
+    private Task SelectRemotePathSuggestionAsync(string path)
+    {
+        return NavigateRemotePathAsync(path);
+    }
+
+    private Task NavigateRemotePathAsync(string? value)
+    {
+        remotePathInput = NormalizeRemotePathInput(value);
+        Editor.RemotePath = remotePathInput == "/" ? string.Empty : remotePathInput.Trim('/');
+        return BrowseRemoteShareFoldersAsync();
+    }
+
+    private bool IsSelectedRemoteShare(RemoteSambaShare share) =>
+        string.Equals(Editor.ShareName.Trim(), share.Name, StringComparison.OrdinalIgnoreCase);
+
+    private void ResetRemoteShareBrowseState(bool clearRemotePath = true)
+    {
+        remoteShareBrowseResult = null;
+        remoteFolderBrowseResult = null;
+        remoteShareBrowseError = null;
+        if (clearRemotePath) { remotePathInput = "/"; Editor.RemotePath = string.Empty; }
+    }
+
+    private static string NormalizeRemotePathInput(string? value)
+    {
+        var normalized = (value ?? string.Empty).Trim().Replace('\\', '/');
+        if (string.IsNullOrWhiteSpace(normalized))
+        {
+            return "/";
+        }
+
+        normalized = "/" + normalized.Trim('/');
+        while (normalized.Contains("//", StringComparison.Ordinal))
+        {
+            normalized = normalized.Replace("//", "/", StringComparison.Ordinal);
+        }
+
+        return normalized;
+    }
+
+    private void OpenTargetFolderBrowser()
+    {
+        if (CanBrowseTargetFolders)
+        {
+            targetFolderBrowserOpen = true;
+        }
+    }
+
+    private Task CloseTargetFolderBrowser()
+    {
+        targetFolderBrowserOpen = false;
+        return Task.CompletedTask;
+    }
+
+    private Task SelectTargetFolderAsync(string path)
+    {
+        if (!string.IsNullOrWhiteSpace(path))
+        {
+            Editor.LocalMountPath = path.Trim();
+            mountPathEdited = false;
+            selectedLocation = ShareMappingMountLocation.SelectedFolder;
+        }
+
+        targetFolderBrowserOpen = false;
+        return Task.CompletedTask;
+    }
+
+    private Task SetLocalUserNameAsync(string? value)
+    {
+        var previousLocalUserName = localUserName;
+        localUserName = string.IsNullOrWhiteSpace(value) ? ResolveDefaultLocalUserName() : value.Trim();
+        if (!localOwnerEdited &&
+            (string.IsNullOrWhiteSpace(Editor.LocalOwner) ||
+             Editor.LocalOwner.Trim().Equals(previousLocalUserName, StringComparison.Ordinal)))
+        {
+            Editor.LocalOwner = localUserName;
+        }
+
+        ApplySelectedMountPathIfAutomatic();
+        return Task.CompletedTask;
+    }
+
+    private Task SetLocalOwnerAsync(string? value)
+    {
+        Editor.LocalOwner = value ?? string.Empty;
+        localOwnerEdited = !string.IsNullOrWhiteSpace(Editor.LocalOwner) &&
+                           !Editor.LocalOwner.Trim().Equals(localUserName, StringComparison.Ordinal);
+        return Task.CompletedTask;
+    }
+
+    private Task SetFileModeAsync(string? value)
+    {
+        Editor.FileMode = NormalizeModeInput(value);
+        return Task.CompletedTask;
+    }
+
+    private Task SetDirectoryModeAsync(string? value)
+    {
+        Editor.DirectoryMode = NormalizeModeInput(value);
+        return Task.CompletedTask;
+    }
+
+    private Task SetLocalMountPathAsync(string? value)
+    {
+        Editor.LocalMountPath = value ?? string.Empty;
+        mountPathEdited = true;
+        selectedLocation = InferLocation(Editor.LocalMountPath);
+        return Task.CompletedTask;
+    }
+
+    private Task SetLocationAsync(ShareMappingMountLocation value)
+    {
+        selectedLocation = value;
+        mountPathEdited = selectedLocation == ShareMappingMountLocation.Custom;
+        ApplySelectedMountPath();
+        return Task.CompletedTask;
+    }
+
+    private Task SetPersistenceAsync(bool value)
+    {
+        Editor.PersistOnServer = value;
+        return Task.CompletedTask;
+    }
+
+    private async Task SubmitAsync()
+    {
+        if (CanSubmit)
+        {
+            await OnCreateMount.InvokeAsync(Editor.PersistOnServer);
+        }
+    }
+
+    private void ApplySelectedMountPathIfAutomatic()
+    {
+        if (!mountPathEdited)
+        {
+            ApplySelectedMountPath();
+        }
+    }
+
+    private void ApplySelectedMountPath()
+    {
+        Editor.LocalMountPath = selectedLocation switch
+        {
+            ShareMappingMountLocation.SelectedFolder when !string.IsNullOrWhiteSpace(PreferredMountPath) => PreferredMountPath.Trim(),
+            ShareMappingMountLocation.MntFolder => ShareMountPathSuggestions.BuildMntMountPath(Editor.Target, Editor.ShareName),
+            ShareMappingMountLocation.HomeFolder => ShareMountPathSuggestions.BuildHomeMountPath(localUserName, Editor.Target, Editor.ShareName),
+            ShareMappingMountLocation.Custom => Editor.LocalMountPath,
+            _ => ShareMountPathSuggestions.BuildLmsDefaultMountPath(Editor.Target, Editor.ShareName)
+        };
+    }
+
+    private ShareMappingMountLocation InferLocation(string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            return ShareMappingMountLocation.LmsDefault;
+        }
+
+        var trimmedPath = path.Trim();
+        if (!string.IsNullOrWhiteSpace(PreferredMountPath) &&
+            trimmedPath.Equals(PreferredMountPath.Trim(), StringComparison.Ordinal))
+        {
+            return ShareMappingMountLocation.SelectedFolder;
+        }
+
+        if (trimmedPath.StartsWith("/home/", StringComparison.Ordinal))
+        {
+            return ShareMappingMountLocation.HomeFolder;
+        }
+
+        if (trimmedPath.StartsWith("/mnt/lms/", StringComparison.Ordinal))
+        {
+            return ShareMappingMountLocation.LmsDefault;
+        }
+
+        if (trimmedPath.StartsWith("/mnt/", StringComparison.Ordinal))
+        {
+            return ShareMappingMountLocation.MntFolder;
+        }
+
+        return ShareMappingMountLocation.Custom;
+    }
+
+    private static string RequiredFieldClass(string value) =>
+        string.IsNullOrWhiteSpace(value)
+            ? "share-mapping-required share-mapping-required-missing"
+            : "share-mapping-required";
+
+    private static string RequiredModeFieldClass(string value) =>
+        IsValidCifsMode(value)
+            ? "share-mapping-required"
+            : "share-mapping-required share-mapping-required-missing";
+
+    private static string NormalizeModeInput(string? value)
+    {
+        var trimmed = value?.Trim() ?? string.Empty;
+        return trimmed.Length == 3 ? $"0{trimmed}" : trimmed;
+    }
+
+    private static bool IsValidCifsMode(string? value)
+    {
+        var trimmed = value?.Trim() ?? string.Empty;
+        var mode = trimmed.Length == 3 ? $"0{trimmed}" : trimmed;
+        return mode.Length == 4 && mode.All(character => character is >= '0' and <= '7');
+    }
+
+    private static string ResolveDefaultLocalUserName()
+    {
+        var userName = Environment.GetEnvironmentVariable("SUDO_USER");
+        if (string.IsNullOrWhiteSpace(userName) || userName.Equals("root", StringComparison.OrdinalIgnoreCase))
+        {
+            userName = Environment.GetEnvironmentVariable("USER");
+        }
+
+        if (string.IsNullOrWhiteSpace(userName) || userName.Equals("root", StringComparison.OrdinalIgnoreCase))
+        {
+            userName = Environment.UserName;
+        }
+
+        return string.IsNullOrWhiteSpace(userName) || userName.Equals("root", StringComparison.OrdinalIgnoreCase)
+            ? "user"
+            : userName;
+    }
+
+    private enum ShareMappingMountLocation
+    {
+        LmsDefault,
+        MntFolder,
+        SelectedFolder,
+        HomeFolder,
+        Custom
+    }
+
+}

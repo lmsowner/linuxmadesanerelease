@@ -1,0 +1,184 @@
+@* Copyright (c) 2026 LMS Developer. All rights reserved.
+   Applicable licence and release scope: see LICENSE.md for details. *@
+@using LinuxMadeSane.Core.Abstractions
+@using LinuxMadeSane.Core.Enums
+@using LinuxMadeSane.Core.Models.RemoteDesktop
+@using LinuxMadeSane.Application.Contracts
+@using LinuxMadeSane.Infrastructure.Persistence
+@using Microsoft.EntityFrameworkCore
+@using Microsoft.Extensions.DependencyInjection
+@implements IAsyncDisposable
+@inject IServiceScopeFactory Scopes
+@inject ISavedCredentialAccessContext Access
+@inject NavigationManager Navigation
+@inject RemoteDesktopMenuNames DesktopNames
+
+<UiContextSubmenu Label="Hosts" Glyph="UiIconGlyph.Connection">
+    @if (!string.IsNullOrEmpty(message)) { <span class="host-menu-status" role="status">@message</span> }
+    @foreach (var group in groups)
+    {
+        <UiContextSubmenu Label="@group.Label" Glyph="UiIconGlyph.Connection">
+            @if (group.Hosts.Count == 0) { <span class="host-menu-status">No saved hosts</span> }
+            @foreach (var host in group.Hosts)
+            {
+                @if (SelectionOnly)
+                {
+                    <UiContextMenuButton Label="@host.Name" Glyph="UiIconGlyph.FolderOpen" OnClick="@(() => HostSelected.InvokeAsync(host.Id))" />
+                }
+                else if (host.FilesOnly)
+                {
+                    <UiContextMenuButton Label="@host.Name" Glyph="UiIconGlyph.Files" Href="@($"/file-browser-window?hostId={host.Id}")" Target="_blank" Rel="noopener"
+                        OnClientClick="if (window.lmsTerminalWindow?.openPopup(this.href, '_blank')) return false;" />
+                }
+                else if (host.Desktop)
+                {
+                    <UiContextMenuButton Label="@host.Name" Glyph="UiIconGlyph.Connection" Href="@($"/remote-desktop/launch/{host.Id}")" Target="_blank" Rel="noopener"
+                        OnClientClick="if (window.lmsTerminalWindow?.openPopup(this.href, '_blank')) return false;" />
+                }
+                else
+                {
+                    <UiContextSubmenu Label="@host.Name" Glyph="UiIconGlyph.Connection">
+                        @if (host.Lms)
+                        {
+                            <UiContextMenuButton Label="Connect" Glyph="UiIconGlyph.Connect" Href="@($"/hosts/{host.Id}/connect")" Target="_blank" Rel="noopener"
+                                OnClientClick="if (window.lmsTerminalWindow?.openBrowserWindow(this.href)) return false;" />
+                        }
+                        <UiContextMenuButton Label="Terminal" Glyph="UiIconGlyph.Terminal" Href="@WorkspaceUrl("terminal", host.Id)" Target="_blank" Rel="noopener"
+                            OnClientClick="if (window.lmsTerminalWindow?.openPopup(this.href, '_blank')) return false;" />
+                        <UiContextMenuButton Label="File browser" Glyph="UiIconGlyph.Files" Href="@WorkspaceUrl("files", host.Id)" Target="_blank" Rel="noopener"
+                            OnClientClick="if (window.lmsTerminalWindow?.openPopup(this.href, '_blank')) return false;" />
+                    </UiContextSubmenu>
+                }
+            }
+        </UiContextSubmenu>
+    }
+</UiContextSubmenu>
+@if (!SelectionOnly)
+{
+<UiContextMenuButton Label="Terminal — current host" Glyph="UiIconGlyph.Terminal" Href="@WorkspaceUrl("terminal", CurrentHostId)" Target="_blank" Rel="noopener"
+    OnClientClick="if (window.lmsTerminalWindow?.openPopup(this.href, '_blank')) return false;" />
+<UiContextMenuButton Label="File browser — current host" Glyph="UiIconGlyph.Files" Href="@WorkspaceUrl("files", CurrentHostId)" Target="_blank" Rel="noopener"
+    OnClientClick="if (window.lmsTerminalWindow?.openPopup(this.href, '_blank')) return false;" />
+<div class="host-file-context-submenu-divider"></div>
+
+}
+
+@code {
+    [Parameter] public Guid? OwnerUserId { get; set; }
+    [Parameter] public bool SelectionOnly { get; set; }
+    [Parameter] public EventCallback<Guid> HostSelected { get; set; }
+    private sealed record HostItem(Guid Id, string Name, bool Desktop = false, bool FilesOnly = false, bool Lms = false);
+    private sealed record HostGroup(string Label, IReadOnlyList<HostItem> Hosts);
+    private IReadOnlyList<HostGroup> groups = [];
+    private string message = "Loading saved hosts…";
+    private Guid? loadedOwner;
+    private bool loaded;
+    private readonly CancellationTokenSource lifetime = new();
+    private Task? refreshLoop;
+    private IReadOnlyList<RemoteDesktopConnection> desktopEntries = [];
+
+    private Guid? CurrentHostId
+    {
+        get
+        {
+            var segments = new Uri(Navigation.Uri).AbsolutePath.Split('/', StringSplitOptions.RemoveEmptyEntries);
+            return segments.Length > 1 && segments[0].Equals("hosts", StringComparison.OrdinalIgnoreCase) && Guid.TryParse(segments[1], out var id) ? id : null;
+        }
+    }
+    private static string WorkspaceUrl(string kind, Guid? hostId) => $"/local-workspace/{kind}" + (hostId.HasValue ? $"?hostId={hostId}" : "");
+
+    protected override void OnInitialized() => Navigation.LocationChanged += LocationChanged;
+    private void LocationChanged(object? sender, Microsoft.AspNetCore.Components.Routing.LocationChangedEventArgs args) =>
+        _ = InvokeAsync(StateHasChanged);
+
+    protected override async Task OnParametersSetAsync()
+    {
+        if (loaded && loadedOwner == OwnerUserId) return;
+        loaded = true; loadedOwner = OwnerUserId; groups = []; desktopEntries = [];
+        await RefreshAsync();
+    }
+    protected override Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender) refreshLoop = RefreshLoopAsync();
+        return Task.CompletedTask;
+    }
+    private async Task RefreshLoopAsync()
+    {
+        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(30));
+        try
+        {
+            await RefreshDesktopNamesAsync();
+            while (await timer.WaitForNextTickAsync(lifetime.Token))
+            {
+                await InvokeAsync(async () => { await RefreshAsync(); StateHasChanged(); });
+                await RefreshDesktopNamesAsync();
+            }
+        }
+        catch (OperationCanceledException) when (lifetime.IsCancellationRequested) { }
+    }
+    private async Task RefreshDesktopNamesAsync()
+    {
+        var snapshot = desktopEntries;
+        var owner = OwnerUserId;
+        using var gate = new SemaphoreSlim(4);
+        try
+        {
+            var entries = await Task.WhenAll(snapshot.Select(async connection =>
+            {
+                await gate.WaitAsync(lifetime.Token);
+                try { return new HostItem(connection.Id, await DesktopNames.ResolveAsync(connection, lifetime.Token), Desktop: true); }
+                catch (Exception) when (!lifetime.IsCancellationRequested)
+                { return new HostItem(connection.Id, $"Unresolved {connection.Protocol} name ({connection.Hostname})", Desktop: true); }
+                finally { gate.Release(); }
+            }));
+            await InvokeAsync(() =>
+            {
+                if (owner != OwnerUserId || !ReferenceEquals(snapshot, desktopEntries) || lifetime.IsCancellationRequested) return;
+                groups = groups.Select(group => group.Label == "Remote desktops"
+                    ? new HostGroup(group.Label, entries.OrderBy(entry => entry.Name, StringComparer.OrdinalIgnoreCase).ToArray()) : group).ToArray();
+                StateHasChanged();
+            });
+        }
+        catch (OperationCanceledException) when (lifetime.IsCancellationRequested) { }
+        catch { /* Keep cached labels; retry on the next background refresh. */ }
+    }
+    private async Task RefreshAsync()
+    {
+        var owner = OwnerUserId;
+        if (owner is null) { groups = []; desktopEntries = []; message = "Sign in to view saved hosts."; return; }
+        try
+        {
+            if (await Access.GetAuthenticatedUserIdAsync(lifetime.Token) != owner)
+            {
+                groups = []; desktopEntries = []; message = "Sign in to view saved hosts."; return;
+            }
+            await using var scope = Scopes.CreateAsyncScope();
+            // Saved inventory only. Never perform discovery, DNS or connection tests here.
+            var hosts = await scope.ServiceProvider.GetRequiredService<IManagedHostStore>().ListAsync(lifetime.Token);
+            IReadOnlyList<RemoteDesktopConnection> desktops = SelectionOnly ? [] : await scope.ServiceProvider.GetRequiredService<IRemoteDesktopConnectionStore>().ListAsync(owner.Value, lifetime.Token);
+            // SFTP endpoints live in the credential vault, not SSH inventory. Cache
+            // display metadata only after checking the circuit's current access.
+            var sftp = await scope.ServiceProvider.GetRequiredService<LinuxMadeSaneDbContext>().SavedConnectionCredentials
+                .AsNoTracking().Where(item => item.Kind == ConnectionCredentialKind.Sftp)
+                .OrderBy(item => item.Name).Select(item => new HostItem(item.Id, item.Name, false, true)).ToArrayAsync(lifetime.Token);
+            if (owner != OwnerUserId || lifetime.IsCancellationRequested) return;
+            desktopEntries = desktops;
+            groups = [
+                new("LMS hosts", hosts.Where(h => h.Kind == ManagedHostKind.LmsHost).OrderBy(h => h.Name, StringComparer.OrdinalIgnoreCase).Select(h => new HostItem(h.Id, h.Name, Lms: true)).ToArray()),
+                new("SSH hosts", hosts.Where(h => h.Kind == ManagedHostKind.SshHost).OrderBy(h => h.Name, StringComparer.OrdinalIgnoreCase).Select(h => new HostItem(h.Id, h.Name)).ToArray()),
+                new("SFTP hosts", sftp),
+                new("Remote desktops", desktops.OrderBy(h => h.Name, StringComparer.OrdinalIgnoreCase).Select(h => new HostItem(h.Id, DesktopNames.CachedOrPending(h), true)).ToArray())];
+            if (SelectionOnly) groups = groups.Where(group => group.Label != "Remote desktops").ToArray();
+            message = "";
+        }
+        catch (OperationCanceledException) when (lifetime.IsCancellationRequested) { }
+        catch { message = "Saved host list could not refresh. Retrying shortly."; }
+    }
+    public async ValueTask DisposeAsync()
+    {
+        Navigation.LocationChanged -= LocationChanged;
+        lifetime.Cancel();
+        if (refreshLoop is not null) await refreshLoop;
+        lifetime.Dispose();
+    }
+}

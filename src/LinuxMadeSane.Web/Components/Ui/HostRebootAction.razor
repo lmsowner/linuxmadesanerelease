@@ -1,0 +1,55 @@
+@* Copyright (c) 2026 LMS Developer. All rights reserved.
+   Applicable licence and release scope: see LICENSE.md for details. *@
+
+@* Copyright (c) 2026 LMS Developer. All rights reserved. *@
+@using LinuxMadeSane.Core.Abstractions
+@using LinuxMadeSane.Core.Models
+@inject ICommandExecutionService Commands
+@inject ILogger<HostRebootAction> Logger
+
+@if(ManagedHostCapabilities.IsLmsHost(Host))
+{
+    <UiCommandButton Label="Reboot" Glyph="UiIconGlyph.Restart" Variant="UiButtonVariant.Action" OnClick="Open" Disabled="busy" />
+    <UiModal IsOpen="@(pending is not null)" Title="Reboot LMS host?" Subtitle="@(pending is null?null:$"{pending.Name} · {pending.Hostname}:{pending.Port}")" CloseOnBackdrop="false" OnClose="Close">
+        <ChildContent>
+            <p class="callout warning">Reboot <strong>@pending?.Name</strong>? This restarts the whole machine. Active users, terminals, file transfers, remote desktops and hosted services will disconnect. Save your work first.</p>
+            <p class="meta-text">The machine may take several minutes to return. Reboot only if you have a way to recover it if it does not restart successfully.</p>
+            @if(message is not null){<p class="@($"callout {tone}")" role="status">@message</p>}
+        </ChildContent>
+        <Footer>
+            <div class="toolbar-row">
+                <UiCommandButton Label="@(sent?"Close":"Cancel")" Variant="UiButtonVariant.Ghost" OnClick="Close" Disabled="busy" />
+                <UiCommandButton Label="@(busy?"Sending request…":"Reboot host")" Glyph="UiIconGlyph.Restart" Variant="UiButtonVariant.Danger" OnClick="ConfirmAsync" Disabled="@(busy||sent)" />
+            </div>
+        </Footer>
+    </UiModal>
+}
+@code {
+    [Parameter,EditorRequired] public ManagedHost Host {get;set;}=null!;
+    private ManagedHost? pending;
+    private bool busy,sent;
+    private string? message;
+    private string tone="info";
+    private void Open(){if(busy||!ManagedHostCapabilities.IsLmsHost(Host))return;pending=Host;sent=false;message=null;tone="info";}
+    private void Close(){if(!busy)pending=null;}
+    protected override void OnParametersSet(){if(pending is not null&&pending.Id!=Host.Id&&!busy)pending=null;}
+    private async Task ConfirmAsync()
+    {
+        if(pending is not {} target||busy||sent)return;
+        busy=true;message="Sending reboot request…";tone="info";await InvokeAsync(StateHasChanged);
+        try
+        {
+            using var timeout=new CancellationTokenSource(TimeSpan.FromSeconds(30));
+            var result=await Commands.ExecuteAsync(target with{DefaultWorkingDirectory="/"},"sudo -n systemctl --no-block reboot",cancellationToken:timeout.Token);
+            if(!result.IsSuccess)throw new InvalidOperationException("The reboot request was rejected. Check this host’s saved administrator access and service logs.");
+            sent=true;tone="success";message="Reboot request sent. This host will disconnect while restarting.";
+            Logger.LogInformation("Reboot requested for LMS host {HostId}",target.Id);
+        }
+        catch(Exception e)
+        {
+            tone="warning";message=e is InvalidOperationException?e.Message:"Could not confirm the reboot request. Check the host’s status before trying again; it may already be restarting.";
+            Logger.LogWarning("Reboot request for LMS host {HostId} could not be confirmed: {ErrorType}",target.Id,e.GetType().Name);
+        }
+        finally{busy=false;}
+    }
+}

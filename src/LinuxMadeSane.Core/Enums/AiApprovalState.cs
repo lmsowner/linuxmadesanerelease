@@ -1,0 +1,14 @@
+// Copyright (c) 2026 LMS Developer. All rights reserved.
+// Applicable licence and release scope: see LICENSE.md for details.
+
+namespace LinuxMadeSane.Core.Enums;
+
+public enum AiApprovalState
+{
+    Pending = 0,
+    Approved = 1,
+    Denied = 2,
+    Blocked = 3,
+    Cancelled = 4,
+    Expired = 5
+}

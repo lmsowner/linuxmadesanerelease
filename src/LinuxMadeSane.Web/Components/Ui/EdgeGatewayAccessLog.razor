@@ -1,0 +1,111 @@
+@* Copyright (c) 2026 LMS Developer. All rights reserved.
+   Applicable licence and release scope: see LICENSE.md for details. *@
+@using LinuxMadeSane.Application.Contracts.EdgeGateway
+@using LinuxMadeSane.Application.Interfaces
+@using LinuxMadeSane.Core.Models.EdgeGateway
+@using LinuxMadeSane.Core.Enums
+@using Microsoft.Extensions.DependencyInjection
+@implements IDisposable
+@inject IServiceScopeFactory Scopes
+
+<div class="edge-access-log">
+    <div class="edge-log-filters">
+        <UiSelectField TValue="string" Label="Service" aria-label="Access log service filter" Compact="true" @bind-Value="hostname" @bind-Value:after="FilterChangedAsync">
+            <option value="">All services</option>
+            @foreach (var host in Hostnames) { <option value="@host">@host</option> }
+        </UiSelectField>
+        <UiSelectField TValue="string" Label="Result" aria-label="Access log result filter" Compact="true" @bind-Value="decision" @bind-Value:after="FilterChangedAsync">
+            <option value="">All results</option>
+            @foreach (var result in Enum.GetNames<EdgeGatewayDecision>()) { <option value="@result">@result</option> }
+        </UiSelectField>
+        <UiSelectField TValue="string" Label="User" aria-label="Access log user filter" Compact="true" @bind-Value="user" @bind-Value:after="FilterChangedAsync">
+            <option value="">All users</option>
+            @foreach (var identity in users.Order()) { <option value="@identity">@identity</option> }
+        </UiSelectField>
+        <UiSelectField TValue="string" Label="Period" aria-label="Access log period filter" Compact="true" @bind-Value="period" @bind-Value:after="FilterChangedAsync">
+            <option value="1">Last hour</option><option value="24">Last 24 hours</option><option value="168">Last 7 days</option><option value="all">All recorded</option>
+        </UiSelectField>
+        <UiSelectField TValue="int" Label="Rows" aria-label="Access log rows filter" Compact="true" @bind-Value="pageSize" @bind-Value:after="ResetPage">
+            <option value="25">25</option><option value="50">50</option><option value="100">100</option>
+        </UiSelectField>
+        <CompactUIButton Label="Clear filters" Glyph="UiIconGlyph.Clear" OnClick="ClearAsync" />
+    </div>
+    <div class="edge-log-status" role="status">
+        <span>@(loading ? "Loading log…" : $"{entries.Count} matching entries{(entries.Count == Limit ? " · latest 500 shown" : "")}")</span>
+        <span>Recent authorization decisions, not open connections.</span>
+        @if (entries.Count > pageSize)
+        {
+            <CompactUIButton Label="Previous" Glyph="UiIconGlyph.SidebarCollapse" Disabled="@(page == 0)" OnClick="Previous" />
+            <span>@(page * pageSize + 1)–@Math.Min((page + 1) * pageSize, entries.Count)</span>
+            <CompactUIButton Label="Next" Glyph="UiIconGlyph.SidebarExpand" Disabled="@((page + 1) * pageSize >= entries.Count)" OnClick="Next" />
+        }
+    </div>
+    @if (!string.IsNullOrEmpty(error)) { <p class="callout error" role="alert">@error</p> }
+    <div class="edge-log-scroll">
+        <table class="edge-log-table">
+            <thead><tr><th>Time</th><th>Service</th><th>Source IP</th><th>User</th><th>Result</th><th>Reason</th></tr></thead>
+            <tbody>
+                @if (!loading && entries.Count == 0) { <tr><td colspan="6">No activity matches these filters.</td></tr> }
+                @foreach (var entry in entries.Skip(page * pageSize).Take(pageSize))
+                {
+                    <tr @key="entry.Id">
+                        <td class="edge-log-time">@entry.TimestampUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss")</td>
+                        <td>@entry.Hostname</td><td>@entry.SourceIp</td><td>@(string.IsNullOrWhiteSpace(entry.UserEmail) ? "—" : entry.UserEmail)</td>
+                        <td><span class="edge-log-result result-@entry.Decision.ToString().ToLowerInvariant()">@entry.Decision</span></td>
+                        <td>@entry.Reason</td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    </div>
+</div>
+
+@code {
+    [Parameter] public IReadOnlyList<EdgeGatewayRoute> Routes { get; set; } = [];
+    [Parameter] public DateTimeOffset RefreshVersion { get; set; }
+    private const int Limit = 500;
+    private string hostname = "", decision = "", user = "", period = "24", error = "";
+    private int page, pageSize = 25;
+    private bool loading, loaded;
+    private DateTimeOffset loadedVersion;
+    private CancellationTokenSource? request;
+    private IReadOnlyList<EdgeGatewayAuditEntry> entries = [];
+    private readonly HashSet<string> users = new(StringComparer.OrdinalIgnoreCase);
+    private IEnumerable<string> Hostnames => Routes.Select(route => route.Hostname).Concat(entries.Select(entry => entry.Hostname))
+        .Append(hostname).Where(value => !string.IsNullOrWhiteSpace(value)).Distinct(StringComparer.OrdinalIgnoreCase).Order();
+    protected override async Task OnParametersSetAsync()
+    {
+        if (loaded && loadedVersion == RefreshVersion) return;
+        loaded = true; loadedVersion = RefreshVersion;
+        await LoadAsync();
+    }
+    private EdgeGatewayAuditFilter BuildFilter() => new()
+    {
+        Hostname = hostname, Decision = decision, UserEmail = user, Take = Limit,
+        FromUtc = int.TryParse(period, out var hours) ? DateTimeOffset.UtcNow.AddHours(-hours) : null
+    };
+    private async Task LoadAsync()
+    {
+        request?.Cancel();
+        var current = new CancellationTokenSource(); request = current;
+        loading = true; error = "";
+        try
+        {
+            await using var scope = Scopes.CreateAsyncScope();
+            var result = await scope.ServiceProvider.GetRequiredService<IEdgeGatewayService>().ListAuditEntriesAsync(BuildFilter(), current.Token);
+            if (current.IsCancellationRequested || !ReferenceEquals(request, current)) return;
+            entries = result.OrderByDescending(entry => entry.TimestampUtc).ToArray();
+            foreach (var identity in entries.Select(entry => entry.UserEmail).Where(value => !string.IsNullOrWhiteSpace(value))) users.Add(identity);
+            page = Math.Min(page, Math.Max(0, (entries.Count - 1) / pageSize));
+        }
+        catch (OperationCanceledException) when (current.IsCancellationRequested) { }
+        catch (Exception failure) { if (ReferenceEquals(request, current)) error = $"Could not load access log: {failure.Message}"; }
+        finally { if (ReferenceEquals(request, current)) { loading = false; request = null; } current.Dispose(); }
+    }
+    private Task FilterChangedAsync() { page = 0; return LoadAsync(); }
+    private void ResetPage() => page = 0;
+    private void Previous() => page = Math.Max(0, page - 1);
+    private void Next() => page = Math.Min(Math.Max(0, (entries.Count - 1) / pageSize), page + 1);
+    private Task ClearAsync() { hostname = decision = user = ""; period = "24"; return FilterChangedAsync(); }
+    public void Dispose() => request?.Cancel();
+}

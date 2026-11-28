@@ -1,0 +1,108 @@
+@* Copyright (c) 2026 LMS Developer. All rights reserved.
+   Applicable licence and release scope: see LICENSE.md for details. *@
+@implements IDisposable
+@inject PasskeyAuthenticationService Passkeys
+
+<div class="account-passkeys-host">
+<UiModal IsOpen="true" Title="Passkeys" Subtitle="@User.Email" Class="account-passkeys-modal" OnClose="CloseAsync">
+    <ChildContent>
+        <p>Revoking a passkey stops it being used to sign in to this LMS account. Existing signed-in sessions stay active.</p>
+        @if (!string.IsNullOrEmpty(feedback))
+        { <p class="callout @(failed ? "error" : "success")" role="status" aria-live="polite">@feedback</p> }
+        @if (confirming)
+        {
+            <div class="surface-subcard">
+                <p><strong>@(pendingId.HasValue ? $"Revoke {pendingName}?" : $"Revoke all passkeys for {User.Email}?")</strong></p>
+                <p>You will need another registered passkey or a working authenticator to sign in again. The saved passkey on your device or in your password manager is not deleted.</p>
+                @if (!User.HasOtpSecret && (!pendingId.HasValue || keys.Count == 1))
+                { <p class="callout warning">This account has no authenticator configured. Revoking its last passkey may prevent signing in until access is set up again.</p> }
+                <div class="passkey-actions">
+                    <UiCommandButton Label="Cancel" Glyph="UiIconGlyph.Clear" Variant="UiButtonVariant.Action" Disabled="@busy" OnClick="CancelRevoke" />
+                    <UiCommandButton Label="@(pendingId.HasValue ? "Revoke passkey" : "Revoke all passkeys")" Glyph="UiIconGlyph.Delete"
+                                     Variant="UiButtonVariant.Danger" Disabled="@(busy || !CanManage)" OnClick="RevokeAsync" />
+                </div>
+            </div>
+        }
+        @if (loading)
+        { <p role="status">Loading passkeys…</p> }
+        else if (keys.Count == 0 && !failed)
+        { <p>No passkeys are registered for this account.</p> }
+        else if (keys.Count > 0)
+        {
+            <div class="passkey-list">
+                <table>
+                    <thead><tr><th>Name</th><th>Added</th><th>Last used</th><th></th></tr></thead>
+                    <tbody>
+                        @foreach (var key in keys)
+                        {
+                            <tr @key="key.Id"><td>@key.FriendlyName</td><td>@When(key.CreatedAtUtc)</td><td>@When(key.LastUsedAtUtc)</td>
+                                <td><UiCommandButton Label="Revoke" Glyph="UiIconGlyph.Delete" Variant="UiButtonVariant.Danger"
+                                                     Disabled="@(busy || confirming || !CanManage)" OnClick="@(() => ConfirmRevoke(key))" /></td></tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        }
+    </ChildContent>
+    <Footer>
+        <UiCommandButton Label="Revoke all" Glyph="UiIconGlyph.Delete" Variant="UiButtonVariant.Danger"
+                         Disabled="@(loading || busy || confirming || keys.Count == 0 || !CanManage)" OnClick="@(() => ConfirmRevoke(null))" />
+        <UiCommandButton Label="Close" Glyph="UiIconGlyph.Clear" Variant="UiButtonVariant.Action" Disabled="@busy" OnClick="CloseAsync" />
+    </Footer>
+</UiModal>
+</div>
+
+@code {
+    [Parameter, EditorRequired] public SecurityUserViewModel User { get; set; } = null!;
+    [Parameter] public bool CanManage { get; set; }
+    [Parameter] public EventCallback OnClose { get; set; }
+    [Parameter] public EventCallback OnChanged { get; set; }
+    private readonly CancellationTokenSource lifetime = new();
+    private IReadOnlyList<SecurityPasskeyCredential> keys = [];
+    private bool loading = true, busy, failed, confirming;
+    private Guid? pendingId;
+    private string feedback = "", pendingName = "";
+
+    protected override async Task OnInitializedAsync()
+    {
+        try
+        {
+            if (!CanManage) throw new UnauthorizedAccessException("Administrator access is required to manage account passkeys.");
+            keys = await Passkeys.ListForUserAsync(User.Id, lifetime.Token);
+        }
+        catch (Exception error) { failed = true; feedback = "Could not load passkeys: " + error.Message; }
+        finally { loading = false; }
+    }
+
+    private void ConfirmRevoke(SecurityPasskeyCredential? key)
+    {
+        if (!CanManage || busy || loading) return;
+        pendingId = key?.Id; pendingName = key?.FriendlyName ?? ""; confirming = true; feedback = "";
+    }
+    private void CancelRevoke() { if (!busy) confirming = false; }
+    private async Task RevokeAsync()
+    {
+        if (!CanManage || busy || !confirming) return;
+        busy = true; failed = false; feedback = "Revoking passkeys…"; StateHasChanged();
+        try
+        {
+            var result = await Passkeys.RevokeForAccountAsync(User.Id, pendingId, lifetime.Token);
+            failed = !result.Succeeded; feedback = result.Message;
+            confirming = false;
+        }
+        catch (Exception error) { failed = true; feedback = "Could not revoke passkeys: " + error.Message; }
+        finally
+        {
+            try
+            {
+                keys = await Passkeys.ListForUserAsync(User.Id, lifetime.Token);
+                await OnChanged.InvokeAsync();
+            }
+            catch (Exception error) { failed = true; feedback += " Could not refresh passkeys: " + error.Message; }
+            busy = false;
+        }
+    }
+    private Task CloseAsync() => busy ? Task.CompletedTask : OnClose.InvokeAsync();
+    private static string When(DateTimeOffset? value) => value?.ToLocalTime().ToString("g") ?? "Never";
+    public void Dispose() { lifetime.Cancel(); lifetime.Dispose(); }
+}

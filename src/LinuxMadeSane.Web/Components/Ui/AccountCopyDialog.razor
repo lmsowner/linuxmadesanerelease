@@ -1,0 +1,245 @@
+@* Copyright (c) 2026 LMS Developer. All rights reserved.
+   Applicable licence and release scope: see LICENSE.md for details. *@
+@implements IDisposable
+@inject LmsAccountCopyService Copy
+@using LinuxMadeSane.AccountEnrollment
+
+<UiModal IsOpen="true" Title="Copy account to servers" Subtitle="@User.Email" OnClose="CloseAsync" Class="account-copy-modal">
+    <ChildContent>
+        @if (!started)
+        {
+            <fieldset class="copy-choices" disabled="@busy">
+                <legend>Select destination servers</legend>
+                <p class="copy-feedback" role="status">@message</p>
+                @foreach (var row in rows)
+                {
+                    <UiCheckboxField @key="row.Host.Id" @bind-Value="row.Selected" Disabled="@busy" Compact="true"
+                                     Label="@row.Host.Name"
+                                     Helper="@(string.Equals(row.Host.Name, row.Host.Hostname, StringComparison.OrdinalIgnoreCase) ? null : row.Host.Hostname)" />
+                }
+            </fieldset>
+            <div class="copy-actions">
+                <UiCommandButton Label="Continue" Glyph="UiIconGlyph.Copy" Variant="UiButtonVariant.Action"
+                                 Disabled="@(busy || !rows.Any(row => row.Selected))" OnClick="StartAsync" />
+                @if (canRecheck)
+                {
+                    <UiCommandButton Label="Recheck servers" Glyph="UiIconGlyph.Refresh" Variant="UiButtonVariant.Action"
+                                     Disabled="@busy" OnClick="LoadDestinationsAsync" />
+                }
+            </div>
+        }
+        else
+        {
+            <p class="copy-count"><strong>@rows.Count(row => row.State == Stage.Verified) of @rows.Count verified</strong></p>
+            @if (current is { } active)
+            {
+                <h3 class="copy-target">@active.Host.Name <span>@active.Host.Hostname</span></h3>
+                @if (active.Enrollment?.OtpUri is { } uri)
+                {
+                    <div class="copy-enrollment" @key="active.Operation">
+                        <UiQrCode Payload="@uri" AriaLabel="@($"Authenticator QR code for {User.Email} on {active.Host.Hostname}")" />
+                        <form class="copy-pin" @onsubmit="VerifyAsync" @onsubmit:preventDefault="true">
+                            <label for="account-copy-pin">Scan the QR code, then enter the six-digit code.</label>
+                            <input id="account-copy-pin" class="ui-text-input" type="text" inputmode="numeric" autocomplete="one-time-code"
+                                   maxlength="6" placeholder="000000" @bind="pin" @bind:event="oninput" disabled="@busy" />
+                            <div class="copy-actions">
+                                <UiCommandButton Type="submit" Label="Verify account" Glyph="UiIconGlyph.Key" Variant="UiButtonVariant.Action"
+                                                 Disabled="@(busy || pin.Length != 6 || !pin.All(char.IsAsciiDigit))" />
+                                <UiCommandButton Label="Skip for now" OnClick="SkipAsync" Disabled="@busy" />
+                            </div>
+                        </form>
+                    </div>
+                }
+            }
+        }
+        @if (started)
+        {
+            <p class="copy-feedback" role="status">@message</p>
+            <ul class="copy-results" aria-label="Destination results">
+                @foreach (var row in rows)
+                {
+                    <li @key="row.Operation">
+                        <span><strong>@row.Host.Name</strong> <span class="copy-muted">@row.Host.Hostname</span></span>
+                        <span class="copy-state">@Describe(row.State)</span>
+                        @if (row.State is Stage.Failed or Stage.Deferred)
+                        {
+                            <UiCommandButton Label="Retry" Title="@($"Retry {row.Host.Name}")" Disabled="@(busy || current is not null)"
+                                             OnClick="@(() => RetryAsync(row))" />
+                        }
+                        @if (!string.IsNullOrEmpty(row.Error)) { <span class="copy-error">@row.Error</span> }
+                    </li>
+                }
+            </ul>
+        }
+    </ChildContent>
+    <Footer>
+        <UiCommandButton Label="@(started && current is null && !busy ? "Done" : "Close")" Glyph="UiIconGlyph.Clear"
+                         Variant="UiButtonVariant.Action" OnClick="CloseAsync" />
+    </Footer>
+</UiModal>
+
+@code {
+    [Parameter, EditorRequired] public SecurityUserViewModel User { get; set; } = null!;
+    [Parameter] public EventCallback OnClose { get; set; }
+
+    private enum Stage { Queued, Connecting, AwaitingCode, Verified, Exists, Failed, Deferred }
+    private sealed class Destination(AccountCopyDestination host)
+    {
+        public AccountCopyDestination Host { get; } = host;
+        public Guid Operation { get; } = Guid.NewGuid();
+        public bool Selected { get; set; }
+        public Stage State { get; set; }
+        public EnrollmentReply? Enrollment { get; set; }
+        public string? Error { get; set; }
+    }
+
+    private readonly CancellationTokenSource lifetime = new();
+    private List<Destination> rows = [];
+    private Destination? current;
+    private bool started, busy, canRecheck;
+    private string message = "", pin = "";
+
+    protected override Task OnInitializedAsync() => LoadDestinationsAsync();
+
+    private async Task LoadDestinationsAsync()
+    {
+        if (started || busy) return;
+        busy = true;
+        canRecheck = false;
+        var selected = rows.Where(row => row.Selected).Select(row => row.Host.Id).ToHashSet();
+        rows.Clear();
+        message = "Checking which servers are missing this account…";
+        try
+        {
+            var result = await Copy.ListAsync(User.Id, lifetime.Token);
+            rows = result.Available.Select(host => new Destination(host) { Selected = selected.Contains(host.Id) }).ToList();
+            canRecheck = result.UnavailableCount > 0;
+            message = result switch
+            {
+                { RegisteredCount: 0 } => "Register a remote LMS server in Hosts to copy an account to it.",
+                { UnavailableCount: 1 } => "1 server could not be checked and is hidden.",
+                { UnavailableCount: > 1 } => $"{result.UnavailableCount} servers could not be checked and are hidden.",
+                { Available.Length: 0 } => "This account already exists on every registered destination server.",
+                _ => ""
+            };
+        }
+        catch (OperationCanceledException) when (lifetime.IsCancellationRequested) { }
+        catch (Exception error)
+        {
+            canRecheck = true;
+            message = error is UnauthorizedAccessException or InvalidOperationException ? error.Message : "Could not check registered servers.";
+        }
+        finally { busy = false; }
+    }
+
+    private async Task StartAsync()
+    {
+        if (busy || started || !rows.Any(row => row.Selected)) return;
+        rows = rows.Where(row => row.Selected).ToList();
+        started = true;
+        await AdvanceAsync();
+    }
+
+    private async Task AdvanceAsync()
+    {
+        pin = "";
+        current = null;
+        busy = true;
+        try
+        {
+            foreach (var row in rows.Where(row => row.State == Stage.Queued))
+            {
+                current = row;
+                row.State = Stage.Connecting;
+                message = $"Contacting {row.Host.Name} over SSH…";
+                await InvokeAsync(StateHasChanged);
+                if (await RequestAsync(row, null, null) && row.State == Stage.AwaitingCode) return;
+                if (lifetime.IsCancellationRequested) return;
+            }
+            current = null;
+            message = rows.Any(row => row.State is Stage.Failed or Stage.Deferred)
+                ? "Review the servers below. You can retry each one separately." : "All selected servers have been checked.";
+        }
+        finally { busy = false; }
+    }
+
+    private async Task VerifyAsync()
+    {
+        if (busy || current is not { Enrollment.Ticket: { } ticket } row || pin.Length != 6 || !pin.All(char.IsAsciiDigit)) return;
+        busy = true;
+        message = $"Verifying the code on {row.Host.Name}…";
+        var submitted = pin;
+        pin = "";
+        await InvokeAsync(StateHasChanged);
+        try { await RequestAsync(row, ticket, submitted); }
+        finally { busy = false; }
+        if (!lifetime.IsCancellationRequested && row.State != Stage.AwaitingCode) await AdvanceAsync();
+    }
+
+    private async Task<bool> RequestAsync(Destination row, string? ticket, string? code)
+    {
+        try
+        {
+            var reply = await Copy.EnrollAsync(User.Id, row.Host.Id, row.Operation, ticket, code, lifetime.Token);
+            switch (reply.Status)
+            {
+                case "pending":
+                    row.Enrollment = reply;
+                    row.State = Stage.AwaitingCode;
+                    message = "";
+                    break;
+                case "verified":
+                case "exists":
+                    row.State = reply.Status == "verified" ? Stage.Verified : Stage.Exists;
+                    row.Enrollment = null;
+                    break;
+                case "invalid":
+                    message = "That code did not verify. Enter the current code for this server.";
+                    break;
+                case "expired":
+                    row.Enrollment = null;
+                    row.State = Stage.Failed;
+                    row.Error = "Enrollment expired. Retry to get a new QR code.";
+                    break;
+            }
+            return true;
+        }
+        catch (OperationCanceledException) when (lifetime.IsCancellationRequested) { return false; }
+        catch (Exception error)
+        {
+            row.State = Stage.Failed;
+            row.Error = error is InvalidOperationException or UnauthorizedAccessException ? error.Message : "Could not reach the destination. Retry this server.";
+            return false;
+        }
+    }
+
+    private async Task RetryAsync(Destination row)
+    {
+        if (busy || current is not null || row.State is not (Stage.Failed or Stage.Deferred)) return;
+        row.Error = null;
+        if (row.Enrollment?.Ticket is not null)
+        {
+            row.State = Stage.AwaitingCode;
+            current = row;
+            pin = "";
+            message = "Enter the current code from this server’s authenticator entry.";
+            return;
+        }
+        row.State = Stage.Queued;
+        await AdvanceAsync();
+    }
+
+    private async Task SkipAsync()
+    {
+        if (busy || current is null) return;
+        current.State = Stage.Deferred;
+        await AdvanceAsync();
+    }
+
+    private static string Describe(Stage state) => state switch {
+        Stage.Queued => "Waiting", Stage.Connecting => "Connecting…", Stage.AwaitingCode => "Awaiting code",
+        Stage.Verified => "Verified", Stage.Exists => "Already exists", Stage.Failed => "Needs attention", _ => "Deferred"
+    };
+    private Task CloseAsync() => OnClose.InvokeAsync();
+    public void Dispose() { lifetime.Cancel(); lifetime.Dispose(); }
+}

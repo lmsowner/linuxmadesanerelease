@@ -1,0 +1,81 @@
+@* Copyright (c) 2026 LMS Developer. All rights reserved.
+   Applicable licence and release scope: see LICENSE.md for details. *@
+@using LinuxMadeSane.Infrastructure.Services
+@inject LocalContainerService Containers
+
+<section class="config-editor" aria-label="Configuration file editor">
+    @if (files.Count > 1)
+    {
+        <label>Configuration file
+            <select aria-label="Configuration file" class="ui-control-input" value="@index" disabled="@(busy || Dirty)" @onchange="ChooseFile">
+                @for (var i = 0; i < files.Count; i++) { <option value="@i">@files[i].Path</option> }
+            </select>
+        </label>
+    }
+    else if (files.Count == 1) { <strong>@files[0].Path</strong> }
+    @if (original != null)
+    {
+        <textarea class="ui-control-input config-text" aria-label="Configuration file contents" spellcheck="false"
+            autocomplete="off" wrap="off" disabled="@busy" @bind="draft" @bind:event="oninput"></textarea>
+        @if (!files[index].Writable) { <small>This mount is read-only inside the container. Saving updates the host file.</small> }
+        <div class="toolbar-row">
+            <UiCommandButton Label="Save file" Size="UiButtonSize.Medium" Variant="UiButtonVariant.PrimaryMuted"
+                Glyph="UiIconGlyph.Save" Disabled="@(busy || !Dirty)" OnClick="Save" />
+            <UiCommandButton Label="Discard edits" Size="UiButtonSize.Medium" Glyph="UiIconGlyph.Clear"
+                Disabled="@(busy || !Dirty)" OnClick="Discard" />
+        </div>
+    }
+    @if (!string.IsNullOrEmpty(message)) { <span role="status">@message</span> }
+</section>
+
+@code {
+    [Parameter, EditorRequired] public string ContainerId { get; set; } = "";
+    private List<ContainerConfigFile> files = [];
+    private int index;
+    private ContainerConfigText? original;
+    private string draft = "", message = "";
+    private bool busy;
+    private bool Dirty => original != null && draft != original.Content;
+
+    protected override Task OnInitializedAsync() => Run("Opening configuration…", async () =>
+    {
+        files = await Containers.ListConfigurationFilesAsync(ContainerId);
+        if (files.Count == 0) message = "No mounted configuration files were found.";
+        else await ReadSelected();
+    });
+
+    private Task ChooseFile(ChangeEventArgs args) => Run("Reading file…", async () =>
+    {
+        index = int.Parse(args.Value!.ToString()!);
+        await ReadSelected();
+    });
+
+    private async Task ReadSelected()
+    {
+        original = null;
+        original = await Containers.ReadConfigurationAsync(ContainerId, files[index]);
+        draft = original.Content;
+        message = "";
+    }
+
+    private Task Save() => Run("Saving file…", async () =>
+    {
+        var version = await Containers.SaveConfigurationAsync(ContainerId, files[index], original!, draft);
+        original = original! with { Content = draft, Revision = version };
+        message = "File saved.";
+    });
+
+    private Task Discard() => Run("Reloading file…", ReadSelected);
+
+    private async Task Run(string progress, Func<Task> operation)
+    {
+        if (busy) return;
+        busy = true;
+        message = progress;
+        try { await operation(); }
+        catch (InvalidOperationException ex) { message = ex.Message; }
+        catch (UnauthorizedAccessException) { message = "Host administrator access is required."; }
+        catch { message = "LMS could not access this configuration file."; }
+        finally { busy = false; }
+    }
+}

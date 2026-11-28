@@ -1,0 +1,81 @@
+@* Copyright (c) 2026 LMS Developer. All rights reserved.
+   Applicable licence and release scope: see LICENSE.md for details. *@
+
+@* Copyright (c) 2026 LMS Developer. All rights reserved. *@
+@using LinuxMadeSane.Core.Models
+@inject LmsWebUiProbe Probe
+@inject LmsUiRepairService Repair
+@implements IDisposable
+
+@if (status is { Available: false })
+{
+    <UiCommandButton Label="@(busy ? "Repairing…" : "Repair LMS")" Glyph="UiIconGlyph.Refresh" Variant="UiButtonVariant.Action"
+                     Disabled="@busy" OnClick="RepairAsync" aria-describedby="@FeedbackId" />
+}
+@if (repaired && status is { Available: true, SignInPage: { } url })
+{
+    <UiCommandButton Label="Open LMS" Glyph="UiIconGlyph.Connect" Variant="UiButtonVariant.Action"
+                     Href="@url.AbsoluteUri" Target="_blank" Rel="noopener noreferrer" />
+}
+<div id="@FeedbackId" class="host-repair-feedback" role="status" aria-live="polite" aria-atomic="true">
+    <span>@message</span>
+    @if (!busy && status is { Available: false })
+    {
+        <span class="host-repair-scope">Repair can start LMS and enable MFA sign-in for a blocked built-in public IPv4 or IPv6 rule.</span>
+    }
+</div>
+
+@code {
+    [Parameter, EditorRequired] public ManagedHost Host { get; set; } = null!;
+    [Parameter] public EventCallback<LmsWebUiStatus> Checked { get; set; }
+    private readonly CancellationTokenSource lifetime = new();
+    private LmsWebUiStatus? status;
+    private bool busy;
+    private bool repaired;
+    private string FeedbackId => $"host-web-access-{Host.Id:N}";
+    private string message = "Opening the web UI from this LMS…";
+
+    protected override async Task OnInitializedAsync()
+    {
+        busy = true;
+        try { await ShowAsync(await Probe.CheckAsync(Host, lifetime.Token)); }
+        catch (OperationCanceledException) when (lifetime.IsCancellationRequested) { }
+        catch { status = LmsWebUiStatus.Unreachable; message = "The web UI check failed. Use Refresh health to retry."; }
+        finally { busy = false; }
+    }
+
+    private async Task ShowAsync(LmsWebUiStatus result)
+    {
+        if (lifetime.IsCancellationRequested) return;
+        status = result;
+        message = result.Available ? "LMS web access verified from this host."
+            : result.AccessDenied ? "LMS is running, but web access is blocked."
+            : "The LMS web UI did not open from this LMS.";
+        await Checked.InvokeAsync(result);
+    }
+
+    private async Task RepairAsync()
+    {
+        if (busy || status?.Available != false) return;
+        busy = true;
+        message = "Rechecking the remote web UI…";
+        await InvokeAsync(StateHasChanged);
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
+        timeout.CancelAfter(TimeSpan.FromMinutes(2));
+        try
+        {
+            var result = await Repair.RepairAsync(Host.Id, text => InvokeAsync(() =>
+            {
+                message = text; StateHasChanged();
+            }), timeout.Token);
+            repaired = result.Available;
+            await ShowAsync(result);
+        }
+        catch (OperationCanceledException) { message = "Repair did not finish. Refresh health to check current access."; }
+        catch (InvalidOperationException ex) { message = ex.Message; }
+        catch { message = "Repair could not finish. Check the saved SSH connection and retry."; }
+        finally { busy = false; }
+    }
+
+    public void Dispose() { lifetime.Cancel(); lifetime.Dispose(); }
+}

@@ -1,0 +1,28 @@
+// Copyright (c) 2026 LMS Developer. All rights reserved.
+// Applicable licence and release scope: see LICENSE.md for details.
+
+using System.ComponentModel.DataAnnotations;
+
+namespace LinuxMadeSane.Application.Contracts.Shares;
+
+public sealed class UserEditor
+{
+    public Guid? Id { get; set; }
+
+    [Required]
+    public string UserName { get; set; } = string.Empty;
+
+    public string DisplayName { get; set; } = string.Empty;
+
+    public string PrimaryGroup { get; set; } = string.Empty;
+
+    public string SupplementaryGroupsCsv { get; set; } = string.Empty;
+
+    public string HomeDirectory { get; set; } = string.Empty;
+
+    public string LoginShell { get; set; } = string.Empty;
+
+    public bool IsEnabled { get; set; } = true;
+    public LinuxMadeSane.Core.Enums.LocalUserSudoMode? SudoMode { get; set; }
+    public bool IsSshKeyOnly { get; set; }
+}

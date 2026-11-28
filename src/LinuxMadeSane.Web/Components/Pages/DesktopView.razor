@@ -1,0 +1,53 @@
+@* Copyright (c) 2026 LMS Developer. All rights reserved.
+   Applicable licence and release scope: see LICENSE.md for details. *@
+
+@* Copyright (c) 2026 LMS Developer. All rights reserved. *@
+@page "/desktop/view/{HostId:guid}"
+@rendermode @(new InteractiveServerRenderMode(prerender: false))
+@implements IDisposable
+@using LinuxMadeSane.Web.Services.RemoteDesktop
+@inject LmsDesktopAccess Desktops
+@inject RemoteDesktopConnections Access
+@inject DesktopViewIntents Intents
+@inject NavigationManager Navigation
+<PageTitle>View desktop | Linux Made Sane</PageTitle>
+<HeadContent><meta name="referrer" content="no-referrer" /></HeadContent>
+<div class="page-shell"><section class="surface-card" style="max-width:42rem;margin:2rem auto">
+    <h2>View desktop</h2>
+    <p role="status" aria-live="polite">@message</p>
+    @if (failed && authorised)
+    { <UiCommandButton Label="Retry" Glyph="UiIconGlyph.Refresh" Disabled="@busy" OnClick="OpenAsync" /> }
+
+</section></div>
+@code {
+    [Parameter] public Guid HostId { get; set; }
+    [SupplyParameterFromQuery(Name = "intent")] public string? Intent { get; set; }
+    private string message = "Opening desktop…";
+    private bool busy, failed, authorised;
+    private readonly CancellationTokenSource lifetime = new();
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!firstRender) return;
+        try
+        {
+            authorised = Intents.Consume(Intent, await Access.UserAsync(lifetime.Token), HostId);
+            if (!authorised) { message = "Open this host using the View desktop button in LMS."; failed = true; StateHasChanged(); return; }
+            await OpenAsync();
+        }
+        catch (Exception error) when (error is not OperationCanceledException) { message = error.Message; failed = true; StateHasChanged(); }
+    }
+    private async Task OpenAsync()
+    {
+        if (busy || !authorised) return;
+        busy = true; failed = false; message = "Opening your desktop through VNC. The first connection may install its VNC server…"; StateHasChanged();
+        try
+        {
+            var connection = await Desktops.PrepareAsync(HostId, progress => InvokeAsync(() => { message = progress; StateHasChanged(); }), lifetime.Token);
+            Navigation.NavigateTo("/remote-desktop/launch/" + connection, forceLoad: true);
+        }
+        catch (OperationCanceledException) when (lifetime.IsCancellationRequested) { }
+        catch (Exception error) { message = error.Message; failed = true; }
+        finally { busy = false; if (!lifetime.IsCancellationRequested) StateHasChanged(); }
+    }
+    public void Dispose() { lifetime.Cancel(); lifetime.Dispose(); }
+}

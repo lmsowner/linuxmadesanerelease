@@ -1,0 +1,308 @@
+@* Copyright (c) 2026 LMS Developer. All rights reserved.
+   Applicable licence and release scope: see LICENSE.md for details. *@
+@using System.Net
+@using Microsoft.AspNetCore.Hosting.Server
+@using Microsoft.AspNetCore.Hosting.Server.Features
+@using LinuxMadeSane.Core.Abstractions
+@using LinuxMadeSane.Infrastructure.Persistence
+@using LinuxMadeSane.Infrastructure.Persistence.Entities
+@using Microsoft.EntityFrameworkCore
+@inject ISavedCredentialAccessContext Access
+@inject IServer Server
+@inject IServiceScopeFactory Scopes
+@inject IJSRuntime JS
+
+<section class="surface-card api-section">
+    <h2 class="inventory-section-heading">Application credentials</h2>
+    <p class="helper-text">Give each application its own token. Select the LMS interface it can call and enter its allowed source IP addresses or CIDR networks, separated by commas.</p>
+    <div class="field-grid">
+        <label><span class="ui-field-label">Application name</span> <input class="ui-control-input" @bind="name" @bind:event="oninput" maxlength="80" /></label>
+        <label><span class="ui-field-label">LMS interface</span> <select class="ui-control-input" @bind="local">
+            @foreach (var a in UiNetworkInterfaceIpCatalog.GetOptions(false, false, true))
+            { <option value="@a.Address">@a.InterfaceName · @a.Address</option> }
+        </select></label>
+        <label><span class="ui-field-label">Allowed source IPs or CIDRs</span> <input class="ui-control-input" @bind="source" @bind:event="oninput" placeholder="10.0.0.42, 192.168.20.0/24" /></label>
+    </div>
+    <div><UiCommandButton Label="@(editing.HasValue ? "Save access" : "Create credential")" Glyph="UiIconGlyph.Key" Disabled="@busy" OnClick="SaveAccess" />
+        @if (editing.HasValue) { <UiCommandButton Label="Cancel" Glyph="UiIconGlyph.Clear" OnClick="ClearEditor" /> }
+    </div>
+    @if (message.Length != 0) { <p role="status">@message</p> }
+    @if (issued != null)
+    {
+        <div class="issued-token">
+            <label class="ui-field-label" for="sftp-issued-token">New API token</label>
+            <div class="token-controls">
+                <input id="sftp-issued-token" class="ui-control-input" readonly value="@issued" autocomplete="off" spellcheck="false" />
+                <UiIconButton Label="Copy token" Glyph="UiIconGlyph.Copy" data-copy-on-click="true" data-copy-text="@issued" OnClick="CopyTokenAsync" />
+                <UiIconButton Label="Hide token" Glyph="UiIconGlyph.Clear" OnClick="@(() => issued = null)" />
+            </div>
+            <p class="helper-text" role="status">@(copyFeedback ?? "Save this token in your application’s secret store before closing.")</p>
+        </div>
+    }
+    @if (clients.Count > 0)
+    {
+        <div class="api-table-scroll">
+            <table class="inventory-table inventory-ruled" aria-label="Application credentials">
+                <thead><tr><th>Application</th><th>LMS interface</th><th>SFTP API base URL</th><th>Allowed sources</th><th>Status</th><th class="action-heading">Actions</th></tr></thead>
+                <tbody>
+                    @foreach (var row in clients)
+                    {
+                        <tr @key="row.Id">
+                            <td><strong>@row.Name</strong></td><td>@row.LocalAddress</td>
+                            <td>
+                                @foreach (var url in ApiBaseUrls(row.LocalAddress).DefaultIfEmpty("No HTTPS listener on this interface"))
+                                {
+                                    <div>@url</div>
+                                }
+                            </td>
+                            <td>@row.SourceNetwork</td>
+                            <td><span class="status-pill @(row.TokenHash.Length == 0 ? "warning" : "success")">@(row.TokenHash.Length == 0 ? "Revoked" : "Active")</span></td>
+                            <td><div class="row-action-cluster">
+                                <UiCommandButton Label="Edit access" Glyph="UiIconGlyph.Edit" Disabled="@busy" OnClick="@(() => Edit(row))" />
+                                <UiCommandButton Label="@(row.TokenHash.Length == 0 ? "Issue token" : "Rotate token")" Glyph="UiIconGlyph.Key" Disabled="@busy" OnClick="@(() => Confirm(row, false))" />
+                                @if (row.TokenHash.Length != 0)
+                                { <UiCommandButton Label="Revoke" Glyph="UiIconGlyph.Lock" Disabled="@busy" OnClick="@(() => Confirm(row, true))" /> }
+                            </div></td>
+                        </tr>
+                        @if (pending == row.Id)
+                        {
+                            <tr><td colspan="6"><div class="row-action-cluster"><span>The previous token will stop working immediately.</span>
+                                <UiCommandButton Label="Confirm" Glyph="UiIconGlyph.Save" Disabled="@busy" OnClick="Apply" />
+                                <UiCommandButton Label="Cancel" Glyph="UiIconGlyph.Clear" OnClick="@(() => pending = null)" />
+                            </div></td></tr>
+                        }
+                    }
+                </tbody>
+            </table>
+        </div>
+    }
+</section>
+<section class="surface-card api-section" aria-labelledby="sftp-overview">
+    <h2 id="sftp-overview" class="inventory-section-heading">SFTP API overview</h2>
+    <p>Your application can give each customer an SFTP login, manage how they sign in and collect the files they upload. Customers transfer files over SSH. Your application manages its accounts and their upload folders through HTTPS.</p>
+    <SftpLanguageTabs @bind-Selected="selectedLanguage" Context="language">
+        @{ var walkthrough = SftpIntegrationExamples.All.First(guide => guide.Language == language); }
+        <div class="walkthrough-content">
+            <p class="helper-text">@walkthrough.Setup Replace sftp.example.net:5443 in each URL with your LMS HTTPS listener.</p>
+            <details class="api-guide"><summary>Connect your application</summary>
+                <p>Enable managed SFTP in Setup. Create an application credential below, select the LMS interface and enter the source IPs or CIDRs your application connects from. Save the issued token in your application’s secret store.</p>
+                <p>Send the token in the Authorization header on every request. Test it with GET /api/sftpserver/, then call GET /api/sftpserver/server/status. Check managed, sshActive and configurationValid before inviting customers to upload.</p>
+                <pre>@walkthrough.Connect</pre>
+            </details>
+            <details class="api-guide"><summary>Check for a customer and create their account</summary>
+                <p>Start with a stable username for the customer. The example checks ownership first and creates an account only when needed. If creation times out or returns a conflict, it reads the account again before deciding whether provisioning succeeded. Review the returned mode and enabled state before giving the customer their login instructions.</p>
+                <pre>@walkthrough.Provision</pre>
+            </details>
+            <details class="api-guide"><summary>Generate an SSH key pair and register the public key</summary>
+                <p><strong>On the customer’s computer</strong>, open a terminal with the OpenSSH client installed. In a private folder, run the command below. Choose a fresh filename if customer-sftp already exists. Enter a passphrase when prompted and confirm it.</p>
+                <pre>ssh-keygen -t ed25519 -f customer-sftp -C "customer SFTP uploads"</pre>
+                <p>Keep <code>customer-sftp</code>, the private key, on that computer. Send only <code>customer-sftp.pub</code> to the administrator through your agreed channel. Verify its fingerprint with the customer before registering it. Both parties can display the fingerprint with <code>ssh-keygen -lf customer-sftp.pub</code>.</p>
+                <p><strong>On the application side</strong>, save the verified public file as <code>customer.pub</code>. For a new login, use it in the account creation example. For an existing login, the following request registers the key and replaces any previous keys. Coordinate a rotation before switching keys.</p>
+                <pre>@walkthrough.RegisterKey</pre>
+                <p><strong>Test on the customer’s computer.</strong> If the account uses PasswordOnly, first use the authentication example below to select PublicKeyOnly or PasswordAndPublicKey. Run this from the private key’s folder. Replace the host with the customer-facing SSH hostname and add <code>-P PORT</code> before the username if SSH uses a custom port.</p>
+                <pre>sftp -o IdentitiesOnly=yes -i ./customer-sftp import_user@@sftp.example.net</pre>
+                <p>Verify the server’s host-key fingerprint with the administrator on first connection. Unlock the private key with its passphrase when prompted. PasswordAndPublicKey also requires the account password. At the SFTP prompt, run <code>cd /files</code> and <code>pwd</code> to confirm access.</p>
+            </details>
+            <details class="api-guide"><summary>Choose or change authentication</summary>
+                <table class="inventory-table inventory-ruled" aria-label="Authentication modes"><thead><tr><th>authenticationMode</th><th>When creating an account</th><th>Customer signs in with</th></tr></thead>
+                <tbody><tr><td>PasswordOnly</td><td>Supply password</td><td>Password</td></tr>
+                <tr><td>PublicKeyOnly</td><td>Supply publicKey</td><td>Matching private key</td></tr>
+                <tr><td>PasswordAndPublicKey</td><td>Supply password and publicKey</td><td>Matching private key and password</td></tr></tbody></table>
+                <p>This example changes an existing account. Choose the target mode explicitly. Register the customer’s public key before requiring it. Replacing a key retires the previous keys. After the change, read back the mode and request the account’s SFTP connection instructions.</p>
+                <pre>@walkthrough.ChangeMode</pre>
+            </details>
+            <details class="api-guide"><summary>Collect uploads and delete after import</summary>
+                <p>This example finds orders-1042.csv in the customer’s upload folder and saves it in the current directory. Ask senders to upload under a temporary name and rename each completed file to a unique .csv name that they never reuse. The delete endpoint identifies the source by path.</p>
+                <p>Cleanup is off by default. Enable it to delete the remote file after checking that the saved bytes match. If your application processes the file, perform cleanup only after processing succeeds.</p>
+                <pre>@walkthrough.Import</pre>
+            </details>
+            <details class="api-guide"><summary>Pause access or remove a customer</summary>
+                <p>Call PUT /api/sftpserver/users/{username}/disable to block new logins. The application can still collect outstanding files. To resume access, call PUT /api/sftpserver/users/{username}/enable. For permanent offboarding, confirm that all required files have been collected before calling DELETE /api/sftpserver/users/{username}. This deletes the account, keys and upload folder.</p>
+                <pre>@walkthrough.Offboard</pre>
+            </details>
+        </div>
+    </SftpLanguageTabs>
+</section>
+<section class="surface-card api-section">
+    <h2 class="inventory-section-heading">API reference</h2>
+    <p class="helper-text">@SftpApiReference.Setup</p>
+    <details class="api-guide"><summary>Connect to /api/sftpserver</summary>
+        <p>@SftpApiReference.Connection</p>
+    </details>
+    <details class="api-guide"><summary>Account and file access</summary>
+        <p>@SftpApiReference.Accounts</p><p>@SftpApiReference.Modes</p><p>@SftpApiReference.Files</p><p>@SftpApiReference.Import</p>
+    </details>
+    <details class="api-guide"><summary>Response fields and types</summary>
+        <dl class="api-parameters">
+            <dt>API connection</dt><dd>service (string) identifies the API. version (integer) is its protocol version.</dd>
+            <dt>Server readiness</dt><dd>managed, sshActive and configurationValid are booleans for managed mode, an active SSH service and a valid host configuration.</dd>
+            <dt>Account</dt><dd>username (string), authenticationMode (PasswordOnly, PublicKeyOnly or PasswordAndPublicKey), hasPublicKey (boolean) and enabled (boolean). Listing returns an array of these objects. Creation returns username and a Location header. The ownership check returns exists (boolean).</dd>
+            <dt>Connection guides</dt><dd>generate and publicKeyExample are strings containing a key-generation command and a sample public key. The login guide returns authenticationMode, command and uploadDirectory as strings.</dd>
+            <dt>Files</dt><dd>A listing is an array of objects. name is the entry name, isDirectory is a boolean and size is an integer byte count. A new upload returns path (string), relative to the upload root. A download returns file bytes with a suggested filename. A 204 response has no body.</dd>
+        </dl>
+    </details>
+    <details class="api-guide"><summary>Response codes</summary><p>@SftpApiReference.Errors</p></details>
+    <table class="inventory-table inventory-ruled" aria-label="API endpoints">
+        <thead><tr><th>Endpoint</th><th>Method</th><th>Purpose</th></tr></thead>
+        <tbody>
+            @foreach (var entry in SftpApiReference.Entries)
+            {
+                var open = expanded == entry;
+                <tr><td><button class="inventory-name-button" type="button" aria-label="@($"{entry.Method} {entry.Path}")" aria-expanded="@(open ? "true" : "false")"
+                    @onclick="@(() => expanded = open ? null : entry)"><span aria-hidden="true">@(open ? "▾" : "▸")</span> @entry.Path</button></td><td>@entry.Method</td><td>@entry.Purpose</td></tr>
+                @if (open)
+                {
+                    <tr><td colspan="3"><p>@entry.Description</p>
+                        <p><strong>Request</strong> · Send <code>Authorization: Bearer YOUR_API_TOKEN</code> over HTTPS.</p>
+                        <p>@(entry.Json is not null ? "Body: application/json, up to 64 KiB." : entry.Upload is not null ? "Body: multipart/form-data. Let your HTTP client set the boundary." : "No request body.")</p>
+                        @if (entry.Parameters.Any())
+                        {
+                            <dl class="api-parameters">
+                                @foreach (var parameter in entry.Parameters)
+                                {
+                                    <dt><code>@parameter.Name</code></dt>
+                                    <dd><strong>@parameter.Location · @parameter.Type · @parameter.Requirement</strong><br />@parameter.Details</dd>
+                                }
+                            </dl>
+                        }
+                        else { <p>No path or query parameters.</p> }
+                        @if (entry.Json is not null)
+                        {
+                            <p>@SftpRequestExamples.JsonInstructions</p><pre>@entry.Json</pre>
+                        }
+                        <SftpLanguageTabs @bind-Selected="selectedLanguage" Context="language">
+                            <pre>@SftpRequestExamples.Languages.First(example => example.Label == language).Render(entry)</pre>
+                        </SftpLanguageTabs>
+                        <p><span class="ui-field-label">Response</span> <code>@entry.Response</code></p></td></tr>
+                }
+            }
+        </tbody>
+    </table>
+</section>
+
+@code {
+    private IEnumerable<string> ApiBaseUrls(string address)
+    {
+        if (!IPAddress.TryParse(address, out var local)) yield break;
+        local = SftpApiAccess.Normalize(local);
+        var ports = new SortedSet<int>();
+        foreach (var endpoint in Server.Features.Get<IServerAddressesFeature>()?.Addresses ?? [])
+        {
+            var binding = Microsoft.AspNetCore.Http.BindingAddress.Parse(endpoint);
+            if (binding.Scheme != Uri.UriSchemeHttps) continue;
+            if (binding.Host.Equals("localhost", StringComparison.OrdinalIgnoreCase) &&
+                !local.Equals(IPAddress.Loopback) && !local.Equals(IPAddress.IPv6Loopback)) continue;
+            if (IPAddress.TryParse(binding.Host.Trim('[', ']'), out var bound) &&
+                !bound.Equals(IPAddress.IPv6Any) &&
+                !(bound.Equals(IPAddress.Any) && local.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork) &&
+                !SftpApiAccess.Normalize(bound).Equals(local)) continue;
+            ports.Add(binding.Port);
+        }
+        foreach (var port in ports)
+            yield return new UriBuilder(Uri.UriSchemeHttps, local.ToString(), port, SftpServerApi.Prefix + "/").Uri.AbsoluteUri;
+    }
+
+    private string name = "", local = "127.0.0.1", source = "", message = "";
+    private List<SftpApiClient> clients = [];
+    private string? issued, copyFeedback;
+
+    private async Task CopyTokenAsync()
+    {
+        var token = issued;
+        if (token is null) return;
+        bool copied;
+        try { copied = await JS.InvokeAsync<bool>("lmsClipboard.finishCopy", token); }
+        catch (JSException) { copied = false; }
+        if (issued == token)
+            copyFeedback = copied ? "Token copied." : "Select the token and copy it manually.";
+    }
+
+    private Guid? pending, editing;
+    private SftpApiReference.Entry? expanded;
+    private string? selectedLanguage = "curl";
+    private bool revoke, busy;
+
+    protected override Task OnInitializedAsync() => Run(_ => Task.CompletedTask);
+
+    private void Edit(SftpApiClient row)
+    {
+        issued = null; pending = null; message = "";
+        editing = row.Id; name = row.Name; local = row.LocalAddress; source = row.SourceNetwork;
+    }
+
+    private void ClearEditor()
+    {
+        editing = null; name = ""; local = "127.0.0.1"; source = "";
+    }
+
+    private Task SaveAccess() => Run(async db =>
+    {
+        if (string.IsNullOrWhiteSpace(name) || name.Length > 80 || !IPAddress.TryParse(local, out var address))
+            throw new ArgumentException("Enter an application name and select an LMS interface.");
+        if (!SftpApiAccess.TryNetworks(source, out var networks))
+            throw new ArgumentException("Enter valid source IPs or CIDRs separated by commas. Check for empty entries.");
+        var client = editing.HasValue ? await db.SftpApiClients.SingleAsync(x => x.Id == editing) : new SftpApiClient { Id = Guid.NewGuid() };
+        client.Name = name.Trim();
+        client.LocalAddress = SftpApiAccess.Normalize(address).ToString();
+        client.SourceNetwork = string.Join(", ", networks.Select(network => network.ToString()));
+        string? token = null;
+        if (!editing.HasValue)
+        {
+            token = SftpApiAccess.Issue(client);
+            db.SftpApiClients.Add(client);
+        }
+        Audit(db, client, editing.HasValue ? "Access updated" : "Credential created");
+        await db.SaveChangesAsync();
+        issued = token;
+        message = editing.HasValue ? $"Access updated for {client.Name}." : $"Credential created for {client.Name}.";
+        ClearEditor();
+    });
+
+    private void Confirm(SftpApiClient row, bool shouldRevoke)
+    {
+        pending = row.Id;
+        revoke = shouldRevoke;
+        issued = null;
+        message = "";
+    }
+
+    private Task Apply() => Run(async db =>
+    {
+        var row = await db.SftpApiClients.SingleAsync(x => x.Id == pending);
+        string? token = null;
+        if (revoke) row.TokenHash = "";
+        else token = SftpApiAccess.Issue(row);
+        Audit(db, row, revoke ? "Credential revoked" : "Credential rotated");
+        await db.SaveChangesAsync();
+        issued = token;
+        message = revoke ? $"Revoked access for {row.Name}." : $"Issued a new token for {row.Name}.";
+        pending = null;
+    });
+
+    private static void Audit(LinuxMadeSaneDbContext db, SftpApiClient client, string action) =>
+        db.SftpAuditEntries.Add(new SftpAuditEntryEntity
+        {
+            Id = Guid.NewGuid(), EventType = "api.credential", TargetType = "application", TargetKey = client.Id.ToString(),
+            Summary = $"{action} for {client.Name}.", Details = $"{client.LocalAddress} from {client.SourceNetwork}",
+            CreatedAtUtc = DateTimeOffset.UtcNow, Success = true
+        });
+
+    private async Task Run(Func<LinuxMadeSaneDbContext,Task> work)
+    {
+        if (busy) return;
+        busy = true;
+        copyFeedback = null;
+        issued = null;
+        try
+        {
+            if (await Access.GetAuthenticatedUserIdAsync() == null) { message = "Host administrator access is required."; return; }
+            await using var scope = Scopes.CreateAsyncScope();
+            var db = scope.ServiceProvider.GetRequiredService<LinuxMadeSaneDbContext>();
+            await work(db);
+            clients = await db.SftpApiClients.AsNoTracking().OrderBy(x => x.Name).ToListAsync();
+        }
+        catch (ArgumentException ex) { message = ex.Message; }
+        catch { message = "Could not complete the credential operation."; }
+        finally { busy = false; }
+    }
+}
